@@ -89,6 +89,9 @@ pub struct App {
 
     tree_items: Vec<TreeItem<'static, usize>>,
     selection: Vec<usize>,
+
+    #[cfg(feature = "db")]
+    db: Option<redb::Database>,
 }
 
 impl App {
@@ -112,6 +115,17 @@ impl App {
             reserve: Default::default(),
             tree_items,
             selection: Default::default(),
+
+            #[cfg(feature = "db")]
+            db: None,
+        }
+    }
+
+    #[cfg(feature = "db")]
+    pub fn with_db(self, db: redb::Database) -> Self {
+        Self {
+            db: Some(db),
+            ..self
         }
     }
 
@@ -491,6 +505,10 @@ impl App {
                 state.action = AppAction::Expand;
                 true
             }
+            KeyCode::Char('E') => {
+                state.action = AppAction::ForceRescan;
+                true
+            }
             KeyCode::Char('d') => {
                 state.action = AppAction::Deflate;
                 true
@@ -811,9 +829,17 @@ impl App {
                 self.tree_items = build_nav_tree(self.get_view(state));
                 state.view_info = None;
             }
-            AppAction::Expand => {
+            expand @ (AppAction::Expand | AppAction::ForceRescan) => {
+                terminal.draw(|frame| {
+                    let text = Text::raw("Rescanning. Please hold...");
+                    let area = frame.area().centered(
+                        Constraint::Length(text.width() as u16),
+                        Constraint::Length(1),
+                    );
+                    frame.render_widget(text, area);
+                })?;
                 let dirty = if !state.qual_select().is_empty() {
-                    self.expand_selected(state)?
+                    self.expand_selected(state, matches!(expand, AppAction::ForceRescan))?
                 } else {
                     self.refresh_root(state)?
                 };
@@ -829,7 +855,7 @@ impl App {
         Ok(())
     }
 
-    fn expand_selected(&mut self, state: &mut AppState) -> Result<bool> {
+    fn expand_selected(&mut self, state: &mut AppState, force: bool) -> Result<bool> {
         let mut selection = state.qual_select();
         let Some(focus) = self.entries.borrow_focus() else {
             return Ok(false);
@@ -870,23 +896,39 @@ impl App {
         let init_root = self.args.path.canonicalize()?;
         let rel_target = target.strip_prefix(&state.root)?;
         let depth = rel_target.components().count();
-        tracing::debug!("Rescanning {target:?}. Root {init_root:?}. tag {tag:?}. depth {depth}");
         let args = self.args.with_depth(depth + self.args.max_depth);
         let entries = std::mem::take(&mut self.entries);
         let mut forest = entries.into_heads().tree;
         let pruned = prune_entry(&mut forest, &selection);
-        match pruned {
-            Either::Left(it) => tracing::debug!("Pruned entry {:?}", DbgEntry(&it)),
-            Either::Right(subtree) => tracing::debug!("Pruned {} subtrees", subtree.len()),
-        }
-        let rx = spawn_walker(&self.colors, &args, Default::default(), &target)?;
-        let leaves = rx.into_iter().filter(|it| {
+        let est_count = match pruned {
+            Either::Left(it) => {
+                tracing::debug!("Pruned entry {:?}", DbgEntry(&it));
+                it.nfiles
+            }
+            Either::Right(subtree) => {
+                tracing::debug!("Pruned {} subtrees", subtree.len());
+                subtree.iter().map(|(_, it)| it.nfiles).sum()
+            }
+        };
+
+        let filter = |it: &Entry| {
             it.path.starts_with(target.as_path())
                 && (tag.is_none()
                     || it.path.extension().unwrap_or_default() == tag.as_ref().unwrap())
-        });
-        let tree = make_forest(&self.colors, &args, &state.root, leaves);
+        };
+
+        let tree = span!(
+            Level::DEBUG,
+            "Rescanning.",
+            ?target,
+            ?init_root,
+            ?tag,
+            depth,
+        )
+        .in_scope(|| self.expand_subtree(state, &target, force, Some(est_count), args, filter))?;
+
         tracing::debug!("Expanded subtree {:?}", DbgTrees(&tree));
+
         let tree = merge_forests(forest, tree);
         self.entries = TreeFocusBuilder {
             tree,
@@ -894,6 +936,106 @@ impl App {
         }
         .build();
         Ok(true)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn expand_subtree(
+        &mut self,
+        state: &mut AppState,
+        target: &std::path::Path,
+        _force: bool,
+        est_count: Option<usize>,
+        args: Args,
+        filter: impl Fn(&Entry) -> bool,
+    ) -> Result<Forest> {
+        let rx = spawn_walker(&self.colors, &args, Default::default(), target)?;
+        let leaves = rx.into_iter().filter(filter);
+        let tree = par_forest(&self.colors, &args, &state.root, leaves, est_count);
+        Ok(tree)
+    }
+
+    #[cfg(feature = "db")]
+    fn expand_subtree(
+        &mut self,
+        state: &mut AppState,
+        target: &std::path::Path,
+        force: bool,
+        est_count: Option<usize>,
+        args: Args,
+        filter: impl Fn(&Entry) -> bool,
+    ) -> Result<Forest> {
+        let rx = if let Some(db) = &self.db {
+            use redb::ReadableDatabase as _;
+            use std::{os::unix::ffi::OsStrExt as _, path::PathBuf};
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let colors = self.colors.clone();
+            let txn = db.begin_read()?;
+            let prefix = target.as_os_str().as_bytes().to_vec();
+            let mut end = Vec::from(prefix.as_slice());
+            end.push(u8::MAX);
+
+            if force {
+                let target = target.to_path_buf();
+                let args = args.clone();
+
+                let write_txn = db.begin_write()?;
+                let mut table = write_txn.open_table(crate::core::TABLE)?;
+                // First, remove existing entries
+                // let _ = table.retain_in(prefix.as_slice()..end.as_slice(), |_, _| false);
+
+                drop(table);
+                write_txn.commit()?;
+
+                let write_txn = db.begin_write()?;
+
+                // Something is very wrong with this that causes the database to inflate
+                // dramatically (>100x times)
+                std::thread::spawn(move || -> Result<()> {
+                    let mut table = write_txn.open_table(crate::core::TABLE)?;
+                    for entry in spawn_walker(&colors, &args, Default::default(), &target)? {
+                        use std::os::unix::ffi::OsStrExt;
+
+                        let key = entry.path.as_os_str().as_bytes();
+                        table.insert(key, &(entry.size as u64))?;
+                        tx.send(entry)?;
+                    }
+
+                    drop(table);
+                    write_txn.commit()?;
+
+                    Ok(())
+                });
+            } else {
+                std::thread::spawn(move || -> Result<()> {
+                    let table = txn.open_table(crate::core::TABLE)?;
+
+                    span!(Level::DEBUG, "Fetching entries from database").in_scope(|| {
+                        let mut iter = table.range(prefix.as_slice()..end.as_slice())?;
+                        while let Some(Ok((key, value))) = iter.next() {
+                            let key = OsStr::from_bytes(key.value());
+
+                            let entry = Entry::new_leaf(
+                                PathBuf::from(key),
+                                value.value() as usize,
+                                &colors,
+                            );
+                            tx.send(entry).unwrap();
+                        }
+
+                        Ok(())
+                    })
+                });
+            }
+            rx
+        } else {
+            spawn_walker(&self.colors, &args, Default::default(), target)?
+        };
+
+        let leaves = rx.into_iter().filter(filter);
+        let tree = span!(Level::DEBUG, "Rebuilding subtree")
+            .in_scope(|| par_forest(&self.colors, &args, &state.root, leaves, est_count));
+        Ok(tree)
     }
 
     fn refresh_root(&mut self, state: &mut AppState) -> Result<bool> {

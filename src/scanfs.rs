@@ -16,8 +16,7 @@ use ratatui::{
 
 use crate::cli::Args;
 use crate::colors::ColorScheme;
-use crate::core::{Entry, Forest};
-use crate::forest::par_forest;
+use crate::core::Entry;
 
 #[derive(Default, Clone)]
 pub struct ScanState {
@@ -25,14 +24,6 @@ pub struct ScanState {
     pub path: PathBuf,
     pub count: usize,
     pub total: usize,
-}
-
-pub fn walk_fs(colors: &ColorScheme, args: &Args, state: Arc<Mutex<ScanState>>) -> Result<Forest> {
-    let root = args.path.canonicalize()?;
-
-    let rx = spawn_walker(colors, args, state, root)?;
-
-    Ok(par_forest(colors, args, &args.path, rx, None))
 }
 
 pub fn spawn_walker(
@@ -82,16 +73,10 @@ pub fn spawn_walker(
                         } else {
                             return WalkState::Continue;
                         }
+                        let size = metadata.len() as usize;
+                        let path = ent.path().into();
 
-                        let color = colors.file_color(ent.path());
-                        let entry = Entry {
-                            path: ent.path().into(),
-                            size: metadata.len() as usize,
-                            nfiles: 1,
-                            leaves: 1,
-                            color,
-                            ..Default::default()
-                        };
+                        let entry = Entry::new_leaf(path, size, &colors);
 
                         if tx.send(entry).is_err() {
                             return WalkState::Quit;

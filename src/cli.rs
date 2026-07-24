@@ -49,7 +49,14 @@ pub struct Args {
 
     /// Git-style override globs. '!' prefix negates glob
     pub overrides: Vec<String>,
+
+    /// Scan directory into a persistent database. Any existing data is overwritten.
+    #[cfg(feature = "db")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = ":memory:")]
+    pub db: Option<String>,
 }
+
+// TODO: snapshot viewing subcommand
 
 impl Args {
     pub fn with_depth(&self, max_depth: usize) -> Self {

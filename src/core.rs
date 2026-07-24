@@ -6,11 +6,16 @@ use std::path::PathBuf;
 use itertools::Itertools as _;
 use ratatui::style::Color;
 
+use crate::colors::ColorScheme;
+
 pub const ENTRY_CHUNK_SIZE: usize = 5000;
 
 pub type Forest = Vec<(usize, Entry)>;
 pub type TreeSlice<'a> = &'a [(usize, Entry)];
 pub type LineageMap = HashMap<(PathBuf, Option<OsString>), HashMap<PathBuf, Entry>>;
+
+#[cfg(feature = "db")]
+pub const TABLE: redb::TableDefinition<&[u8], u64> = redb::TableDefinition::new("file_sizes");
 
 #[derive(Debug, Clone)]
 pub enum MaybePair<T>
@@ -61,6 +66,20 @@ pub struct Entry {
     pub is_group: bool,
 }
 
+impl Entry {
+    pub fn new_leaf(path: PathBuf, size: usize, colors: &ColorScheme) -> Self {
+        let color = colors.file_color(&path);
+        Self {
+            path,
+            size,
+            nfiles: 1,
+            leaves: 1,
+            color,
+            ..Default::default()
+        }
+    }
+}
+
 // TODO: consolidation/composition
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct EntryInfo {
@@ -100,6 +119,7 @@ impl<'a> Debug for DbgEntry<'a> {
             .field("path", &self.0.path)
             .field("tag", &self.0.tag)
             .field("size", &self.0.size)
+            .field("nfiles", &self.0.nfiles)
             .field("leaves", &self.0.leaves)
             .finish()
     }

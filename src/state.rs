@@ -24,6 +24,7 @@ pub enum AppAction {
     SwitchMode(AppMode),
     Deflate,
     Expand,
+    ForceRescan,
 }
 
 #[derive(Default)]
