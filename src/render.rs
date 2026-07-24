@@ -7,6 +7,7 @@ use ratatui::{
     text::ToLine as _,
     widgets::{Block, BorderType, Fill, Widget},
 };
+use typed_path::TypedPath;
 
 use crate::state::AppState;
 use crate::{
@@ -128,7 +129,8 @@ pub fn render_entry(
         ..
     } = entry;
 
-    let title = path.file_name().unwrap_or_default();
+    let title = TypedPath::from(path.file_name().unwrap_or_default());
+
     let display = title.display();
 
     if let Some(click) = &state.click_pos

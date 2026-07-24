@@ -6,6 +6,7 @@ use itertools::Itertools as _;
 
 use tracing::{Level, instrument, span};
 use tui_tree_widget::TreeItem;
+use typed_path::TypedPath;
 
 use crate::core::{ENTRY_CHUNK_SIZE, Entry, StackAddr, TreeSlice};
 
@@ -111,7 +112,11 @@ pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
                 subtrees.push(tree);
             } else {
                 let title = entry.path.file_name().unwrap_or_default();
-                let text = format!("[{}] {}", format_size(entry.size, DECIMAL), title.display());
+                let text = format!(
+                    "[{}] {}",
+                    format_size(entry.size, DECIMAL),
+                    TypedPath::from(title).display()
+                );
                 if entry.subtree.is_empty() {
                     subtrees.push(TreeItem::new_leaf(*id, text));
                 } else {
@@ -137,7 +142,11 @@ fn tree_items(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
 
 fn enty_to_nav(id: usize, entry: &Entry) -> TreeItem<'static, usize> {
     let title = entry.path.file_name().unwrap_or_default();
-    let text = format!("[{}] {}", format_size(entry.size, DECIMAL), title.display());
+    let text = format!(
+        "[{}] {}",
+        format_size(entry.size, DECIMAL),
+        TypedPath::from(title).display()
+    );
     if entry.subtree.is_empty() {
         TreeItem::new_leaf(id, text)
     } else {

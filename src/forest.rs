@@ -1,17 +1,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ffi::{OsStr, OsString};
 use std::ops::Range;
-use std::path::Path;
 
 use either::Either;
 use itertools::Itertools as _;
 use tracing::{Level, span};
+use typed_path::TypedPath;
 
 use crate::cli::Args;
 use crate::colors::ColorScheme;
 use crate::core::{
-    CountedForest, DbgEntry, ENTRY_CHUNK_SIZE, Entry, Forest, LineageMap, MaybePair, StackAddr,
-    TreeSlice, cumsum_size, sort_largest,
+    BString, Bytes, CountedForest, DbgEntry, ENTRY_CHUNK_SIZE, Entry, Forest, LineageMap,
+    MaybePair, StackAddr, TreeSlice, cumsum_size, sort_largest,
 };
 
 pub struct LeafIterator {
@@ -85,10 +84,10 @@ pub fn key_range(whole: TreeSlice) -> Option<Range<usize>> {
 // Items are sorted by size rather than path so we need to do a linear scan.
 // This can be rather slow with wide trees, especially in X-ray mode with
 // a large number of extensions and top-level directories.
-pub fn tree_find_path(
+pub fn tree_find_path<'a>(
     tree: TreeSlice,
-    path: &Path,
-    tag: Option<&OsStr>,
+    path: TypedPath<'a>,
+    tag: Option<Bytes>,
     addr: &StackAddr,
 ) -> Option<Vec<usize>> {
     for (id, entry) in tree {
@@ -168,13 +167,13 @@ pub fn prune_entry(
     }
 }
 
-pub fn treeify(
+pub fn treeify<'a>(
     _args: &Args,
     kidding: &mut LineageMap,
-    path: &Path,
-    ext: &Option<OsString>,
+    path: TypedPath<'a>,
+    ext: Option<Bytes>,
 ) -> Forest {
-    let key = (path.to_path_buf(), ext.clone());
+    let key = (path.to_path_buf(), ext.map(|x| x.to_vec()));
     let Some(entries) = kidding.remove(&key) else {
         return Default::default();
     };
@@ -182,7 +181,7 @@ pub fn treeify(
     let mut entries = entries
         .into_values()
         .map(|mut it| {
-            let subtree = treeify(_args, kidding, &it.path, ext);
+            let subtree = treeify(_args, kidding, it.path.to_path(), ext);
             if !subtree.is_empty() {
                 if it.size == 0 {
                     it.size = subtree.iter().map(|(_, it)| it.size).sum();
@@ -261,15 +260,15 @@ pub fn merge_forests(left: Forest, right: Forest) -> Vec<(usize, Entry)> {
 
 // Move entries instead of slicing to reduce allocations. Still need to allocate for interior
 // nodes, but should be an order of magnitude less.
-pub fn make_forest(
+pub fn make_forest<'a>(
     colors: &ColorScheme,
     args: &Args,
-    root: impl AsRef<Path>,
+    root: TypedPath<'a>,
     leaves: impl IntoIterator<Item = Entry>,
 ) -> Vec<(usize, Entry)> {
-    let root = root.as_ref().canonicalize().unwrap_or(args.path.clone());
+    let root = root.absolutize().expect("Could not ccanonicalize path");
 
-    let (kidding, extensions) = rehash(colors, args, &root, leaves);
+    let (kidding, extensions) = rehash(colors, args, root.to_path(), leaves);
 
     let mut kidding = kidding;
 
@@ -284,31 +283,30 @@ pub fn make_forest(
         let entries = extensions
             .iter()
             .map(|ext| {
-                let subtree = treeify(args, &mut kidding, &root, &Some(ext.clone()));
+                let subtree = treeify(args, &mut kidding, root.to_path(), Some(&ext[..]));
                 let size = subtree.iter().map(|(_, it)| it.size).sum();
                 let nfiles = subtree.iter().map(|(_, it)| it.nfiles).sum();
                 let leaves = subtree.iter().map(|(_, it)| it.leaves).sum();
 
-                tracing::trace!(ft = ?CountedForest(&subtree), "x-ray for {}", ext.display());
+                tracing::trace!(ft = ?CountedForest(&subtree), "x-ray for {}", TypedPath::from(&ext[..]).display());
 
                 let label = if ext.is_empty() {
                     "(none)".into()
                 } else {
-                    format!("**.{}", ext.display())
+                    format!("**.{}", TypedPath::from(&ext[..]).display())
                 };
 
                 let color = colors.ext_color(ext);
                 let path = root.join(label);
-                Entry {
-                    path,
-                    size,
-                    nfiles,
-                    leaves,
-                    subtree,
-                    color,
-                    is_group: true,
-                    ..Default::default()
-                }
+                Entry::builder()
+                    .path(path)
+                    .size(size)
+                    .nfiles(nfiles)
+                    .leaves(leaves)
+                    .subtree(subtree)
+                    .color(color)
+                    .is_group(true)
+                    .build()
             })
             .collect_vec();
 
@@ -316,23 +314,27 @@ pub fn make_forest(
 
         cumsum_size(sort_largest(entries))
     } else {
-        treeify(args, &mut kidding, &root, &Default::default())
+        treeify(args, &mut kidding, root.to_path(), None)
     }
 }
 
-pub fn rehash(
+pub fn rehash<'a>(
     colors: &ColorScheme,
     args: &Args,
-    root: impl AsRef<Path>,
+    root: TypedPath<'a>,
     leaves: impl IntoIterator<Item = Entry>,
-) -> (LineageMap, HashSet<OsString>) {
+) -> (LineageMap, HashSet<BString>) {
     let mut kidding: LineageMap = Default::default();
-    let mut extensions: HashSet<OsString> = Default::default();
+    let mut extensions: HashSet<BString> = Default::default();
 
-    let root_depth = root.as_ref().components().count();
+    let root_depth = root.components().count();
 
     for entry in leaves {
-        let ext = entry.path.extension().unwrap_or_default().to_os_string();
+        let ext = entry
+            .path
+            .extension()
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
 
         let ext = if args.xray {
             // entry.path.extension().map(|s| s.to_os_string())
@@ -351,57 +353,58 @@ pub fn rehash(
 
         if comps.len() > args.max_depth {
             // Create/Update a summary node and drop entry
-            let mut summary_path = root.as_ref().to_path_buf();
-            summary_path.extend(comps.iter().take(args.max_depth));
-            let summary_parent = summary_path.to_path_buf();
+            let mut summary_path = root.to_path_buf();
+            comps
+                .iter()
+                .take(args.max_depth)
+                .for_each(|p| summary_path.push(p));
+            let summary_parent = summary_path.clone();
 
             if let Some(ext) = cursor.path.extension() {
-                summary_path.extend(["**"]);
+                summary_path.push("**");
                 summary_path.set_extension(ext);
             } else {
-                summary_path.extend(["(none)"]);
+                summary_path.push("(none)");
             }
 
             let siblings = kidding
                 .entry((summary_parent.clone(), ext.clone()))
                 .or_default();
-            let entry = siblings
-                .entry(summary_path.clone())
-                .or_insert_with(|| Entry {
-                    path: summary_path,
-                    color,
-                    leaves: 1,
-                    is_group: true,
-                    ..Default::default()
-                });
+            let entry = siblings.entry(summary_path.clone()).or_insert_with(|| {
+                Entry::builder()
+                    .path(summary_path)
+                    .color(color)
+                    .leaves(1)
+                    .is_group(true)
+                    .build()
+            });
             entry.nfiles += cursor.nfiles;
             entry.size += cursor.size;
 
-            let color = colors.dir_color(&summary_parent);
-            cursor = Entry {
-                path: summary_parent,
-                color,
-                tag: ext.clone(),
-                ..Default::default()
-            }
+            let color = colors.dir_color(summary_parent.to_path());
+            cursor = Entry::builder()
+                .path(summary_parent)
+                .size(0)
+                .color(color)
+                .tag(ext.clone())
+                .build()
         }
 
         while let Some(parent) = cursor.path.parent() {
             let parent = parent.to_path_buf();
-            let path = cursor.path.to_path_buf();
+            let path = cursor.path.clone();
             let siblings = kidding.entry((parent.clone(), ext.clone())).or_default();
             if siblings.contains_key(&path) {
                 break;
             }
 
             siblings.insert(path, cursor);
-            let color = colors.dir_color(&parent);
-            cursor = Entry {
-                path: parent,
-                color,
-                tag: ext.clone(),
-                ..Default::default()
-            }
+            let color = colors.dir_color(parent.to_path());
+            cursor = Entry::builder()
+                .path(parent)
+                .color(color)
+                .tag(ext.clone())
+                .build()
         }
     }
     (kidding, extensions)
@@ -409,7 +412,7 @@ pub fn rehash(
 
 #[allow(unused)]
 pub fn regroup(entries: Vec<Entry>) -> Vec<Entry> {
-    let mut groups: HashMap<OsString, Vec<Entry>> = Default::default();
+    let mut groups: HashMap<BString, Vec<Entry>> = Default::default();
     entries
         .into_iter()
         .map(|it| {
@@ -432,7 +435,7 @@ pub fn regroup(entries: Vec<Entry>) -> Vec<Entry> {
             if v.len() == 1 {
                 v.pop().unwrap()
             } else {
-                let label = format!("*.{}", k.display());
+                let label = format!("*.{}", TypedPath::from(&k[..]).display());
                 let size = v.iter().map(|it| it.size).sum();
                 let nfiles = v.iter().map(|it| it.nfiles).sum();
                 let leaves = if v.is_empty() {
@@ -443,16 +446,14 @@ pub fn regroup(entries: Vec<Entry>) -> Vec<Entry> {
                 let color = v[0].color;
                 let subtree = cumsum_size(v);
 
-                Entry {
-                    path: label.into(),
-                    size,
-                    nfiles,
-                    leaves,
-                    subtree,
-                    color,
-                    is_group: true,
-                    ..Default::default()
-                }
+                Entry::builder()
+                    .path(label.into())
+                    .size(size)
+                    .nfiles(nfiles)
+                    .leaves(leaves)
+                    .subtree(subtree)
+                    .color(color)
+                    .build()
             }
         })
         .collect();
@@ -460,10 +461,10 @@ pub fn regroup(entries: Vec<Entry>) -> Vec<Entry> {
     sort_largest(entries)
 }
 
-pub fn par_forest(
+pub fn par_forest<'a>(
     colors: &ColorScheme,
     args: &Args,
-    root: impl AsRef<Path>,
+    root: TypedPath<'a>,
     leaves: impl IntoIterator<Item = Entry>,
     est_count: Option<usize>,
 ) -> Vec<(usize, Entry)> {
@@ -471,7 +472,7 @@ pub fn par_forest(
     use itertools::Itertools as _;
     use std::thread;
 
-    let root = root.as_ref().canonicalize().unwrap_or(args.path.clone());
+    let root = root.absolutize().expect("Could not canonicalize path");
 
     let num_workers = est_count.map(|c| c / ENTRY_CHUNK_SIZE / 10);
     let num_cores = thread::available_parallelism()
@@ -482,7 +483,7 @@ pub fn par_forest(
 
     tracing::info!("Building forest in parallel with {num_threads} workers");
     if num_threads <= 1 {
-        return make_forest(colors, args, root, leaves);
+        return make_forest(colors, args, root.to_path(), leaves);
     }
 
     thread::scope(|ts| {
@@ -496,7 +497,7 @@ pub fn par_forest(
                     let args = args.clone();
                     let root = root.clone();
                     let rx = rx.clone();
-                    move || make_forest(colors, &args, &root, rx.into_iter().flatten())
+                    move || make_forest(colors, &args, root.to_path(), rx.into_iter().flatten())
                 })
             })
             .map(Either::Left)

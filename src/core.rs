@@ -1,22 +1,30 @@
-use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fmt::Debug;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::Path};
 
 use itertools::Itertools as _;
 use ratatui::style::Color;
+use typed_builder::TypedBuilder;
+use typed_path::{NativePath, TypedPath, TypedPathBuf};
 
 use crate::colors::ColorScheme;
 
 pub const ENTRY_CHUNK_SIZE: usize = 5000;
 
+#[cfg(feature = "db")]
+pub const TEMP_DB_ID: &str = ":temp";
+
+pub type Bytes<'a> = &'a [u8];
+pub type BString = Vec<u8>;
 pub type Forest = Vec<(usize, Entry)>;
 pub type TreeSlice<'a> = &'a [(usize, Entry)];
-pub type LineageMap = HashMap<(PathBuf, Option<OsString>), HashMap<PathBuf, Entry>>;
+pub type LineageMap = HashMap<(TypedPathBuf, Option<Vec<u8>>), HashMap<TypedPathBuf, Entry>>;
 
 #[cfg(feature = "db")]
 pub const TABLE: redb::TableDefinition<&[u8], u64> = redb::TableDefinition::new("file_sizes");
 
+pub fn path_from_std(value: impl AsRef<Path>) -> TypedPathBuf {
+    NativePath::new(value.as_ref().as_os_str().as_encoded_bytes()).to_typed_path_buf()
+}
 #[derive(Debug, Clone)]
 pub enum MaybePair<T>
 where
@@ -54,39 +62,55 @@ impl<'a> StackAddr<'a> {
     }
 }
 
-#[derive(Default, Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(TypedBuilder, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Entry {
-    pub path: PathBuf,
-    pub tag: Option<OsString>,
+    pub path: TypedPathBuf,
+
+    #[builder(default)]
     pub size: usize,
+
+    #[builder(default)]
+    pub tag: Option<Vec<u8>>,
+    #[builder(default = 1)]
     pub nfiles: usize,
+    #[builder(default = 1)]
     pub leaves: usize,
+
+    #[builder(default = Vec::new())]
     pub subtree: Forest,
+
+    #[builder(default)]
     pub color: Color,
+    #[builder(default)]
     pub is_group: bool,
 }
 
 impl Entry {
-    pub fn new_leaf(path: PathBuf, size: usize, colors: &ColorScheme) -> Self {
-        let color = colors.file_color(&path);
+    pub fn new_leaf<'a>(path: TypedPath<'a>, size: usize, colors: &ColorScheme) -> Self {
+        let color = colors.file_color(path);
         Self {
-            path,
+            path: path.to_path_buf(),
             size,
+            tag: None,
             nfiles: 1,
             leaves: 1,
+            subtree: Default::default(),
             color,
-            ..Default::default()
+            is_group: false,
         }
     }
 }
 
 // TODO: consolidation/composition
-#[derive(Default, Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(TypedBuilder, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct EntryInfo {
-    pub path: PathBuf,
-    pub tag: Option<OsString>,
+    pub path: TypedPathBuf,
     pub size: usize,
+    #[builder(default)]
+    pub tag: Option<TypedPathBuf>,
+    #[builder(default)]
     pub nfiles: usize,
+    #[builder(default)]
     pub leaves: usize,
 }
 
@@ -94,16 +118,20 @@ impl From<&Entry> for EntryInfo {
     fn from(value: &Entry) -> Self {
         let Entry {
             path,
-            tag,
             size,
+            tag,
             nfiles,
             leaves,
             ..
         } = value;
 
+        let tag = tag
+            .as_ref()
+            .map(|bytes| TypedPathBuf::from(bytes.as_slice()));
+
         Self {
             path: path.clone(),
-            tag: tag.clone(),
+            tag,
             size: *size,
             nfiles: *nfiles,
             leaves: *leaves,

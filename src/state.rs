@@ -1,14 +1,15 @@
 use std::fmt::Debug;
-use std::path::PathBuf;
-use std::{ffi::OsString, path::Path};
+use std::path::Path;
 
 use humansize::{DECIMAL, format_size};
 use ratatui::layout::{Position, Rect};
 
 use thousands::Separable;
 use tui_tree_widget::TreeState;
+use typed_builder::TypedBuilder;
+use typed_path::TypedPathBuf;
 
-use crate::core::{Entry, EntryInfo, Forest};
+use crate::core::{Entry, EntryInfo, Forest, path_from_std};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum AppMode {
@@ -27,36 +28,48 @@ pub enum AppAction {
     ForceRescan,
 }
 
-#[derive(Default)]
+#[derive(TypedBuilder)]
 pub struct AppState {
     #[cfg(feature = "clipboard")]
+    #[builder(default)]
     pub clipboard: Option<arboard::Clipboard>,
 
-    pub root: PathBuf,
+    pub root: TypedPathBuf,
+
+    #[builder(default)]
     pub mode: AppMode,
+    #[builder(default)]
     pub action: AppAction,
+    #[builder(default)]
     pub diagnostic: bool,
 
+    #[builder(default)]
     pub view_info: Option<EntryInfo>,
-    pub title: Option<OsString>,
+    #[builder(default)]
+    pub title: Option<String>,
+    #[builder(default)]
     pub skip_view: Vec<usize>,
+    #[builder(default)]
     pub tree_state: TreeState<usize>,
-    pub tag: Option<OsString>,
+    #[builder(default)]
+    pub tag: Option<Vec<u8>>,
 
+    #[builder(default)]
     pub click_pos: Option<Position>,
+    #[builder(default)]
     pub click_area: Rect,
+    #[builder(default)]
     pub click_addr: Vec<usize>,
 }
 
 impl AppState {
     pub fn new(path: impl AsRef<Path>, mode: AppMode) -> Self {
-        Self {
-            root: path.as_ref().to_path_buf(),
-            mode,
-            #[cfg(feature = "clipboard")]
-            clipboard: arboard::Clipboard::new().ok(),
-            ..Default::default()
-        }
+        let this = Self::builder().root(path_from_std(path)).mode(mode);
+
+        #[cfg(feature = "clipboard")]
+        let this = this.clipboard(arboard::Clipboard::new().ok());
+
+        this.build()
     }
 
     /// Address of selection qualified with current view
@@ -102,16 +115,20 @@ impl TreeFocus {
     }
 }
 
-pub fn get_title(state: &AppState, info: &EntryInfo) -> OsString {
+pub fn get_title(state: &AppState, info: &EntryInfo) -> String {
     let mut title = if info.tag.is_none() {
-        info.path.clone().into_os_string()
+        info.path.to_string_lossy().into_owned()
     } else if let Some(tag) = &info.tag {
-        info.path.join("**").with_extension(tag).into_os_string()
+        info.path
+            .join("**")
+            .with_extension(tag)
+            .to_string_lossy()
+            .into_owned()
     } else {
-        state.root.as_os_str().to_os_string()
+        state.root.to_string_lossy().into_owned()
     };
 
-    title.push(format!(
+    title.push_str(&format!(
         " | {} ({} files)",
         format_size(info.size, DECIMAL),
         info.nfiles.separate_with_commas()

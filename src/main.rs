@@ -19,7 +19,10 @@ use cli::{Args, init_logging};
 use config::Config;
 use scanfs::{ScanState, ScanUI};
 
-use crate::{colors::ColorScheme, core::Forest, forest::par_forest, scanfs::spawn_walker};
+use crate::{
+    colors::ColorScheme, core::Forest, core::path_from_std, forest::par_forest,
+    scanfs::spawn_walker,
+};
 
 #[instrument]
 fn main() -> Result<()> {
@@ -74,7 +77,13 @@ fn scan_to_mem(mut args: Args, config: Config) -> Result<App> {
             let root = args.path.canonicalize()?;
 
             let rx = spawn_walker(&scheme, &args, state.clone(), root)?;
-            let forest = par_forest(&scheme, &args, &args.path, rx, None);
+            let forest = par_forest(
+                &scheme,
+                &args,
+                path_from_std(&args.path).to_path(),
+                rx,
+                None,
+            );
             let mut state = state.lock().unwrap();
             state.done = true;
             Ok(forest)
@@ -126,7 +135,7 @@ fn scan_to_db(mut args: Args, config: Config) -> Result<App> {
 
     let db_path = shellexpand::full(db_path)?;
 
-    let db_path = if db_path == ":memory:" {
+    let db_path = if db_path == ":temp:" {
         // TODO: do better
         // TODO: cleanup on exit
         tempfile::NamedTempFile::with_suffix("-leaves.db")?
@@ -145,9 +154,7 @@ fn scan_to_db(mut args: Args, config: Config) -> Result<App> {
 
             let mut table = write_txn.open_table(core::TABLE)?;
             for entry in rx {
-                use std::os::unix::ffi::OsStrExt;
-
-                let key = entry.path.as_os_str().as_bytes();
+                let key = entry.path.as_bytes();
                 table.insert(key, &(entry.size as u64))?;
                 db_tx.send(entry)?;
             }
@@ -163,7 +170,13 @@ fn scan_to_db(mut args: Args, config: Config) -> Result<App> {
         let args = args.clone();
         let scheme = scheme.clone();
         std::thread::spawn(move || -> Result<Forest> {
-            let forest = par_forest(&scheme, &args, &args.path, db_rx, None);
+            let forest = par_forest(
+                &scheme,
+                &args,
+                path_from_std(&args.path).to_path(),
+                db_rx,
+                None,
+            );
             let mut state = state.lock().unwrap();
             state.done = true;
             Ok(forest)

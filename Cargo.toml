@@ -35,6 +35,8 @@ tracing-subscriber = { version = "0.3.23", features = [
   "registry",
 ] }
 tui-tree-widget = "0.24.0"
+typed-builder = "0.23.2"
+typed-path = "0.12.3"
 
 [profile.perf]
 inherits = "release"
@@ -44,4 +46,4 @@ strip = false        # Don't strip symbols
 [features]
 default = ["clipboard", "db"]
 clipboard = ["dep:arboard"]
-db = ["dep:redb", "dep:tempfile"]
+db = [ "dep:redb", "dep:tempfile"]

@@ -1,10 +1,9 @@
-use std::ffi::OsStr;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-use std::path::Path;
 
 use colorgrad::preset::{greys, viridis, yl_or_br};
 use colorgrad::{BasisGradient, Gradient as _, GradientBuilder};
 use ratatui::style::Color;
+use typed_path::TypedPath;
 
 use crate::config::Config;
 
@@ -68,38 +67,34 @@ impl ColorScheme {
         }
     }
 
-    pub fn dir_color(&self, dir_path: impl AsRef<Path>) -> Color {
+    pub fn dir_color<'a>(&self, dir_path: TypedPath<'a>) -> Color {
         if self.mono {
             return Color::Reset;
         }
 
         let mut h = DefaultHasher::default();
-        format!(
-            "{}",
-            dir_path.as_ref().file_name().unwrap_or_default().display()
-        )
-        .hash(&mut h);
+        dir_path.file_name().map(TypedPath::from).hash(&mut h);
         let id = h.finish();
 
         let color = self.shift(self.dir_grad.at(id as f32 / u64::MAX as f32));
         Color::from(color.to_rgba8())
     }
 
-    pub fn file_color(&self, file_path: impl AsRef<Path>) -> Color {
-        if let Some(ext) = file_path.as_ref().extension() {
+    pub fn file_color<'a>(&self, file_path: TypedPath<'a>) -> Color {
+        if let Some(ext) = file_path.extension() {
             self.ext_color(ext)
         } else {
             Color::Reset
         }
     }
 
-    pub fn ext_color(&self, ext: &OsStr) -> Color {
-        if self.mono || ext.is_empty() {
+    pub fn ext_color(&self, ext: impl AsRef<[u8]>) -> Color {
+        if self.mono || ext.as_ref().is_empty() {
             return Color::Reset;
         }
 
         let mut h = DefaultHasher::default();
-        format!("{}", ext.display()).hash(&mut h);
+        TypedPath::from(ext.as_ref()).hash(&mut h);
         let id = h.finish();
 
         let color = self.shift(self.ext_grad.at(id as f32 / u64::MAX as f32));

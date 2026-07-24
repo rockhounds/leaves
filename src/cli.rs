@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use color_eyre::Result;
 
+#[cfg(feature = "db")]
+use crate::core::TEMP_DB_ID;
+
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Args {
@@ -52,7 +55,7 @@ pub struct Args {
 
     /// Scan directory into a persistent database. Any existing data is overwritten.
     #[cfg(feature = "db")]
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = ":memory:")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = TEMP_DB_ID)]
     pub db: Option<String>,
 }
 
@@ -62,13 +65,6 @@ impl Args {
     pub fn with_depth(&self, max_depth: usize) -> Self {
         Self {
             max_depth,
-            ..self.clone()
-        }
-    }
-
-    pub fn with_path(&self, path: impl AsRef<Path>) -> Self {
-        Self {
-            path: path.as_ref().to_path_buf(),
             ..self.clone()
         }
     }

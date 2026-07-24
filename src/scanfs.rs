@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::cli::Args;
 use crate::colors::ColorScheme;
-use crate::core::Entry;
+use crate::core::{Entry, path_from_std};
 
 #[derive(Default, Clone)]
 pub struct ScanState {
@@ -74,9 +74,9 @@ pub fn spawn_walker(
                             return WalkState::Continue;
                         }
                         let size = metadata.len() as usize;
-                        let path = ent.path().into();
+                        let path = path_from_std(ent.path());
 
-                        let entry = Entry::new_leaf(path, size, &colors);
+                        let entry = Entry::new_leaf(path.to_path(), size, &colors);
 
                         if tx.send(entry).is_err() {
                             return WalkState::Quit;
