@@ -43,7 +43,7 @@ pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
             return;
         }
 
-        for (id, it) in &entry.subtree {
+        for (id, it) in entry.subtree.iter() {
             let addr = addr.push(*id);
             split_tree(tx, &addr, it);
         }

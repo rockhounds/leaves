@@ -184,6 +184,14 @@ pub fn render_entry(
             .style(style)
             .render(inner, buf);
     } else if inner.height > 2 || inner.width > 2 {
-        render_subtree(config, state, addr, inner, buf, subtree, selection);
+        render_subtree(
+            config,
+            state,
+            addr,
+            inner,
+            buf,
+            subtree.as_slice(),
+            selection,
+        );
     }
 }

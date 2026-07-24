@@ -27,11 +27,12 @@ use crate::{
     cli::Args,
     colors::ColorScheme,
     config::Config,
-    core::{
-        DbgEntry, DbgTrees, ENTRY_CHUNK_SIZE, Entry, EntryInfo, Forest, StackAddr, path_from_std,
-    },
+    core::{DbgEntry, DbgTrees, ENTRY_CHUNK_SIZE, Entry, EntryInfo, StackAddr, path_from_std},
     explorer::build_nav_tree,
-    forest::{deforest, make_forest, merge_forests, par_forest, prune_entry, tree_find_path},
+    forest::{
+        Forest, deforest, into_leaves, make_forest, merge_forests, par_forest, prune_deep,
+        tree_find_path,
+    },
     render::render_subtree,
     scanfs::spawn_walker,
     state::{AppAction, AppMode, AppState, TreeFocus, TreeFocusBuilder, get_selection, get_title},
@@ -551,7 +552,8 @@ impl App {
     }
 
     fn sync_view(&mut self, state: &mut AppState) {
-        while let Some(entry) = get_selection(&state.skip_view, self.entries.borrow_tree())
+        while let Some(entry) =
+            get_selection(&state.skip_view, self.entries.borrow_tree().as_slice())
             && entry.subtree.is_empty()
         {
             state.skip_view.pop();
@@ -596,9 +598,9 @@ impl App {
         let mut cursor = self.entries.borrow_tree();
 
         for id in state.skip_view.iter() {
-            if let Ok(idx) = cursor.binary_search_by_key(id, |(id, _)| *id) {
-                result = Some(EntryInfo::from(&cursor[idx].1));
-                cursor = &cursor[idx].1.subtree;
+            if let Some(entry) = cursor.binary_search(*id) {
+                result = Some(EntryInfo::from(entry));
+                cursor = &entry.subtree;
             }
         }
 
@@ -620,14 +622,18 @@ impl App {
         }
     }
 
-    fn get_view(&self, state: &AppState) -> &[(usize, Entry)] {
+    fn get_view(&self, state: &AppState) -> crate::core::TreeSlice<'_> {
         state
             .skip_view
             .iter()
             .fold(self.entries.borrow_tree().as_slice(), |view, id| {
                 if let Ok(idx) = view.binary_search_by_key(id, |(id, _)| *id) {
                     let subtree = &view[idx].1.subtree;
-                    if subtree.is_empty() { view } else { subtree }
+                    if subtree.is_empty() {
+                        view
+                    } else {
+                        subtree.as_slice()
+                    }
                 } else {
                     view
                 }
@@ -671,14 +677,14 @@ impl App {
                         let count = self.reserve.len()
                             + forest.iter().map(|(_, it)| it.leaves).sum::<usize>();
                         let items = std::mem::take(&mut self.reserve);
-                        let items = items.into_iter().chain(deforest(forest));
+                        let items = items.into_iter().chain(into_leaves(forest.into_entries()));
                         (Either::Left(items), Some(count))
                     }
                     AppMode::Xray => {
                         self.args.xray = true;
 
                         let count = state.view_info.as_ref().map(|it| it.leaves);
-                        let pruned = match prune_entry(&mut forest, state.skip_view.as_slice()) {
+                        let pruned = match prune_deep(&mut forest, state.skip_view.as_slice()) {
                             Either::Left(entry) => entry.subtree,
                             Either::Right(forest) => forest,
                         };
@@ -736,7 +742,7 @@ impl App {
                 span!(Level::DEBUG, "Restoring view.").in_scope(|| {
                     if let Some(path) = restore_view
                         && let Some(addr) = tree_find_path(
-                            self.entries.borrow_tree(),
+                            self.entries.borrow_tree().as_slice(),
                             path,
                             restore_tag.as_deref(),
                             &StackAddr::root(),
@@ -749,7 +755,7 @@ impl App {
                 span!(Level::DEBUG, "Restoring selection.").in_scope(|| {
                     if let Some(path) = restore_path
                         && let Some(addr) = tree_find_path(
-                            self.entries.borrow_tree(),
+                            self.entries.borrow_tree().as_slice(),
                             path.to_path(),
                             restore_tag.as_deref(),
                             &StackAddr::root(),
@@ -772,7 +778,8 @@ impl App {
 
                 let focus = if focus.subtree.is_empty()
                     && selection.pop().is_some()
-                    && let Some(entry) = get_selection(&selection, self.entries.borrow_tree())
+                    && let Some(entry) =
+                        get_selection(&selection, self.entries.borrow_tree().as_slice())
                 {
                     let rel_sel = selection
                         .iter()
@@ -804,7 +811,7 @@ impl App {
                 // Extract forest into mutable and prune the target subtree
                 let entries = std::mem::take(&mut self.entries);
                 let mut forest = entries.into_heads().tree;
-                let pruned = match prune_entry(&mut forest, &selection) {
+                let pruned = match prune_deep(&mut forest, &selection) {
                     Either::Left(entry) => {
                         if entry.subtree.is_empty() {
                             unreachable!("Cannot fold a leaf");
@@ -822,7 +829,7 @@ impl App {
 
                 self.entries = TreeFocusBuilder {
                     tree,
-                    focus_builder: |tree| get_selection(&selection, tree),
+                    focus_builder: |tree| get_selection(&selection, tree.as_slice()),
                 }
                 .build();
 
@@ -863,7 +870,7 @@ impl App {
 
         let focus = if focus.subtree.is_empty()
             && selection.pop().is_some()
-            && let Some(entry) = get_selection(&selection, self.entries.borrow_tree())
+            && let Some(entry) = get_selection(&selection, self.entries.borrow_tree().as_slice())
         {
             let rel_sel = selection
                 .iter()
@@ -896,7 +903,7 @@ impl App {
         let args = self.args.with_depth(depth + self.args.max_depth);
         let entries = std::mem::take(&mut self.entries);
         let mut forest = entries.into_heads().tree;
-        let pruned = prune_entry(&mut forest, &selection);
+        let pruned = prune_deep(&mut forest, &selection);
         let est_count = match pruned {
             Either::Left(it) => {
                 tracing::debug!("Pruned entry {:?}", DbgEntry(&it));
@@ -933,12 +940,12 @@ impl App {
             )
         })?;
 
-        tracing::debug!("Expanded subtree {:?}", DbgTrees(&tree));
+        tracing::debug!("Expanded subtree {:?}", DbgTrees(tree.as_slice()));
 
         let tree = merge_forests(forest, tree);
         self.entries = TreeFocusBuilder {
             tree,
-            focus_builder: |tree| get_selection(&selection, tree),
+            focus_builder: |tree| get_selection(&selection, tree.as_slice()),
         }
         .build();
         Ok(true)

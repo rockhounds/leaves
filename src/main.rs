@@ -20,7 +20,9 @@ use config::Config;
 use scanfs::{ScanState, ScanUI};
 
 use crate::{
-    colors::ColorScheme, core::Forest, core::path_from_std, forest::par_forest,
+    colors::ColorScheme,
+    core::path_from_std,
+    forest::{Forest, par_forest},
     scanfs::spawn_walker,
 };
 

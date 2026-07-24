@@ -9,9 +9,11 @@ use typed_path::TypedPath;
 use crate::cli::Args;
 use crate::colors::ColorScheme;
 use crate::core::{
-    BString, Bytes, CountedForest, DbgEntry, ENTRY_CHUNK_SIZE, Entry, Forest, LineageMap,
-    MaybePair, StackAddr, TreeSlice, cumsum_size, sort_largest,
+    BString, Bytes, CountedForest, DbgEntry, ENTRY_CHUNK_SIZE, Entry, LineageMap, MaybePair,
+    StackAddr, cumsum_size, sort_largest,
 };
+
+pub type TreeSlice<'a> = &'a [(usize, Entry)];
 
 pub struct LeafIterator {
     entries: VecDeque<Entry>,
@@ -41,7 +43,7 @@ pub fn into_leaves(entries: impl Iterator<Item = Entry>) -> LeafIterator {
 }
 
 pub fn deforest(forest: Forest) -> LeafIterator {
-    into_leaves(forest.into_iter().map(|(_, it)| it))
+    into_leaves(forest.into_entries())
 }
 
 pub fn partition(whole: TreeSlice) -> MaybePair<TreeSlice> {
@@ -106,7 +108,7 @@ pub fn tree_find_path<'a>(
             return Some(result);
         }
 
-        if let Some(result) = tree_find_path(&entry.subtree, path, tag, &addr) {
+        if let Some(result) = tree_find_path(entry.subtree.as_slice(), path, tag, &addr) {
             return Some(result);
         }
     }
@@ -114,57 +116,8 @@ pub fn tree_find_path<'a>(
     None
 }
 
-pub fn prune_entry(
-    forest: &mut Vec<(usize, Entry)>,
-    view_addr: &[usize],
-) -> Either<Entry, Vec<(usize, Entry)>> {
-    // Traverse twice instead of using a parent var to appease borrow checker
-    // Could also use an parent + Some(child_idx) to represent cursor, but that just makes
-    // the single traversal more complicated for little practical gain.
-    tracing::debug!(?view_addr, "Pruning entry at address");
-
-    let mut addr = Vec::new();
-    let mut cursor = &*forest;
-    for id in view_addr {
-        if let Ok(idx) = cursor.binary_search_by_key(id, |(id, _)| *id) {
-            addr.push(idx);
-            cursor = &cursor[idx].1.subtree;
-        } else {
-            break;
-        }
-    }
-
-    tracing::debug!(?addr, "Resolved view to indices");
-
-    // Second traversal to the parent Vec, then splice out the entry
-    // to ensure we don't leave dangling empty directories that will
-    // be confused as empty leaves.
-    if let Some(last_idx) = addr.pop() {
-        let mut cursor = &mut *forest;
-        for idx in &addr {
-            cursor = &mut cursor[*idx].1.subtree;
-        }
-
-        let (_, entry) = cursor.remove(last_idx);
-        tracing::debug!(entry=?DbgEntry(&entry), "Extracted entry from tree");
-
-        // And now a third pass to fix all the counters for surgical edits
-        let mut cursor = &mut *forest;
-        for idx in &addr {
-            let container = &mut cursor[*idx].1;
-            container.nfiles -= entry.nfiles;
-            container.leaves -= entry.leaves;
-            container.size -= entry.size;
-
-            cursor = &mut cursor[*idx].1.subtree;
-        }
-
-        tracing::debug!("Fixed ancestor counts");
-
-        Either::Left(entry)
-    } else {
-        Either::Right(std::mem::take(forest))
-    }
+pub fn prune_deep(forest: &mut Forest, view_addr: &[usize]) -> Either<Entry, Forest> {
+    forest.prune_deep(view_addr)
 }
 
 pub fn treeify<'a>(
@@ -221,8 +174,8 @@ pub fn merge_entries(mut left: Entry, right: Entry) -> Entry {
     left
 }
 
-pub fn merge_forests(left: Forest, right: Forest) -> Vec<(usize, Entry)> {
-    let queue = left.into_iter().chain(right).map(|(_, it)| it);
+pub fn merge_forests(left: Forest, right: Forest) -> Forest {
+    let queue = left.into_entries().chain(right.into_entries());
     // .sorted_by_key(|it| (it.path.to_path_buf(), it.tag.clone()))
     // .collect();
 
@@ -265,7 +218,7 @@ pub fn make_forest<'a>(
     args: &Args,
     root: TypedPath<'a>,
     leaves: impl IntoIterator<Item = Entry>,
-) -> Vec<(usize, Entry)> {
+) -> Forest {
     let root = root.absolutize().expect("Could not ccanonicalize path");
 
     let (kidding, extensions) = rehash(colors, args, root.to_path(), leaves);
@@ -288,7 +241,7 @@ pub fn make_forest<'a>(
                 let nfiles = subtree.iter().map(|(_, it)| it.nfiles).sum();
                 let leaves = subtree.iter().map(|(_, it)| it.leaves).sum();
 
-                tracing::trace!(ft = ?CountedForest(&subtree), "x-ray for {}", TypedPath::from(&ext[..]).display());
+                tracing::trace!(ft = ?CountedForest(subtree.as_slice()), "x-ray for {}", TypedPath::from(&ext[..]).display());
 
                 let label = if ext.is_empty() {
                     "(none)".into()
@@ -467,7 +420,7 @@ pub fn par_forest<'a>(
     root: TypedPath<'a>,
     leaves: impl IntoIterator<Item = Entry>,
     est_count: Option<usize>,
-) -> Vec<(usize, Entry)> {
+) -> Forest {
     use crossbeam_channel::unbounded;
     use itertools::Itertools as _;
     use std::thread;
@@ -491,7 +444,8 @@ pub fn par_forest<'a>(
 
         // Create forests in parallel from chunks of entries.
         // Use chunking to reduce overhead from channel
-        let mut handles = (0..num_threads)
+        let mut handles: Vec<Either<thread::ScopedJoinHandle<'_, Forest>, Forest>> = (0
+            ..num_threads)
             .map(|_| {
                 ts.spawn({
                     let args = args.clone();
@@ -523,8 +477,8 @@ pub fn par_forest<'a>(
                         Either::Left(h) => h.join().expect("Couldn't join threads"),
                         Either::Right(v) => v,
                     })
-                    .inspect(|forest| {
-                        tracing::trace!(forest = ?CountedForest(forest), "Make/merge forest result.")
+                    .inspect(|forest: &Forest| {
+                        tracing::trace!(forest = ?CountedForest(forest.as_slice()), "Make/merge forest result.")
                     })
                     .collect_vec()
             });
@@ -536,7 +490,7 @@ pub fn par_forest<'a>(
 
             if results.len() <= 1 {
                 let Some(result) = results.pop() else {
-                    return Vec::default();
+                    return Default::default();
                 };
 
                 return result;
@@ -548,7 +502,7 @@ pub fn par_forest<'a>(
                 .into_iter()
                 .map(|mut chunk| {
                     let Some(left) = chunk.next() else {
-                        return Either::Right(Vec::new());
+                        return Either::Right(Default::default());
                     };
 
                     let Some(right) = chunk.next() else {
@@ -560,4 +514,123 @@ pub fn par_forest<'a>(
                 .collect_vec();
         }
     })
+}
+
+#[repr(transparent)]
+#[derive(Default, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct Forest(Vec<(usize, Entry)>);
+
+impl Forest {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn as_slice(&self) -> TreeSlice<'_> {
+        self.0.as_slice()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &(usize, Entry)> {
+        self.0.iter()
+    }
+
+    pub fn into_entries(self) -> impl Iterator<Item = Entry> {
+        {
+            let this = self.0;
+            this.into_iter().map(|(_, v)| v)
+        }
+    }
+
+    pub fn index_of(&self, key: usize) -> Option<usize> {
+        self.0.binary_search_by_key(&key, |(id, _)| *id).ok()
+    }
+
+    pub fn binary_search(&self, key: usize) -> Option<&Entry> {
+        if let Ok(idx) = self.0.binary_search_by_key(&key, |(id, _)| *id) {
+            Some(&self.0[idx].1)
+        } else {
+            None
+        }
+    }
+
+    pub fn prune_deep(&mut self, view_addr: &[usize]) -> Either<Entry, Forest> {
+        // Traverse twice instead of using a parent var to appease borrow checker
+        // Could also use an parent + Some(child_idx) to represent cursor, but that just makes
+        // the single traversal more complicated for little practical gain.
+        tracing::debug!(?view_addr, "Pruning entry at address");
+
+        let mut addr = Vec::new();
+        let mut cursor = &*self.0;
+        for id in view_addr {
+            if let Ok(idx) = cursor.binary_search_by_key(id, |(id, _)| *id) {
+                addr.push(idx);
+                cursor = &cursor[idx].1.subtree.0;
+            } else {
+                break;
+            }
+        }
+
+        tracing::debug!(?addr, "Resolved view to indices");
+
+        // Second traversal to the parent Vec, then splice out the entry
+        // to ensure we don't leave dangling empty directories that will
+        // be confused as empty leaves.
+        if let Some(last_idx) = addr.pop() {
+            let mut cursor: &mut Vec<(usize, Entry)> = &mut self.0;
+            for idx in &addr {
+                cursor = &mut cursor[*idx].1.subtree.0;
+            }
+
+            let (_, entry) = cursor.remove(last_idx);
+            tracing::debug!(entry=?DbgEntry(&entry), "Extracted entry from tree");
+
+            // And now a third pass to fix all the counters for surgical edits
+            let mut cursor = &mut *self.0;
+            for idx in &addr {
+                let container = &mut cursor[*idx].1;
+                container.nfiles -= entry.nfiles;
+                container.leaves -= entry.leaves;
+                container.size -= entry.size;
+
+                cursor = &mut cursor[*idx].1.subtree.0;
+            }
+
+            tracing::debug!("Fixed ancestor counts");
+
+            Either::Left(entry)
+        } else {
+            Either::Right(std::mem::take(self))
+        }
+    }
+}
+
+impl IntoIterator for Forest {
+    type Item = (usize, Entry);
+
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+// impl From<Gump> for Forest {
+//     fn from(value: Gump) -> Self {
+//         value.0
+//     }
+// }
+//
+// impl From<Forest> for Gump {
+//     fn from(value: Forest) -> Self {
+//         Gump(value)
+//     }
+// }
+
+impl FromIterator<(usize, Entry)> for Forest {
+    fn from_iter<T: IntoIterator<Item = (usize, Entry)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect_vec())
+    }
 }

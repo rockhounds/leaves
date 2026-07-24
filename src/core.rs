@@ -13,10 +13,10 @@ pub const ENTRY_CHUNK_SIZE: usize = 5000;
 #[cfg(feature = "db")]
 pub const TEMP_DB_ID: &str = ":temp";
 
+pub use crate::forest::TreeSlice;
+
 pub type Bytes<'a> = &'a [u8];
 pub type BString = Vec<u8>;
-pub type Forest = Vec<(usize, Entry)>;
-pub type TreeSlice<'a> = &'a [(usize, Entry)];
 pub type LineageMap = HashMap<(TypedPathBuf, Option<Vec<u8>>), HashMap<TypedPathBuf, Entry>>;
 
 #[cfg(feature = "db")]
@@ -76,8 +76,8 @@ pub struct Entry {
     #[builder(default = 1)]
     pub leaves: usize,
 
-    #[builder(default = Vec::new())]
-    pub subtree: Forest,
+    #[builder(default)]
+    pub subtree: crate::forest::Forest,
 
     #[builder(default)]
     pub color: Color,
@@ -189,7 +189,7 @@ pub fn sort_largest(mut entries: Vec<Entry>) -> Vec<Entry> {
 }
 
 /// Transform list of entries, tagging each with cumulative size of preceding siblings.
-pub fn cumsum_size(entries: Vec<Entry>) -> Vec<(usize, Entry)> {
+pub fn cumsum_size(entries: Vec<Entry>) -> crate::forest::Forest {
     entries
         .into_iter()
         .scan(0, |acc, it| {

@@ -9,7 +9,7 @@ use tui_tree_widget::TreeState;
 use typed_builder::TypedBuilder;
 use typed_path::TypedPathBuf;
 
-use crate::core::{Entry, EntryInfo, Forest, path_from_std};
+use crate::core::{Entry, EntryInfo, TreeSlice, path_from_std};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum AppMode {
@@ -90,7 +90,7 @@ impl AppState {
 
 #[ouroboros::self_referencing(pub_extras)]
 pub struct TreeFocus {
-    pub tree: Forest,
+    pub tree: crate::forest::Forest,
 
     #[borrows(tree)]
     #[covariant]
@@ -110,7 +110,7 @@ impl Default for TreeFocus {
 impl TreeFocus {
     pub fn select(&mut self, selection: &[usize]) {
         self.with_mut(|fields| {
-            *fields.focus = get_selection(selection, fields.tree);
+            *fields.focus = get_selection(selection, fields.tree.as_slice());
         });
     }
 }
@@ -136,10 +136,7 @@ pub fn get_title(state: &AppState, info: &EntryInfo) -> String {
     title
 }
 
-pub fn get_selection<'a>(
-    mut selection: &[usize],
-    mut level: &'a [(usize, Entry)],
-) -> Option<&'a Entry> {
+pub fn get_selection<'a>(mut selection: &[usize], mut level: TreeSlice<'a>) -> Option<&'a Entry> {
     while let Some(id) = selection.first()
         && let Ok(idx) = level.binary_search_by_key(id, |(k, _)| *k)
     {
@@ -149,7 +146,7 @@ pub fn get_selection<'a>(
         }
 
         selection = &selection[1..];
-        level = &entry.subtree;
+        level = entry.subtree.as_slice();
     }
 
     None
