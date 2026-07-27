@@ -88,7 +88,7 @@ pub struct App {
     selection: Vec<usize>,
 
     #[cfg(feature = "db")]
-    db: Option<redb::Database>,
+    db: Option<fjall::Database>,
 }
 
 impl App {
@@ -119,7 +119,7 @@ impl App {
     }
 
     #[cfg(feature = "db")]
-    pub fn with_db(self, db: redb::Database) -> Self {
+    pub fn with_db(self, db: fjall::Database) -> Self {
         Self {
             db: Some(db),
             ..self
@@ -970,78 +970,80 @@ impl App {
         args: Args,
         filter: impl Fn(&Entry) -> bool,
     ) -> Result<Forest> {
-        let rx = if let Some(db) = &self.db {
-            use redb::ReadableDatabase as _;
+        use fjall::{KeyspaceCreateOptions, PersistMode};
 
-            let (tx, rx) = std::sync::mpsc::channel();
-            let colors = self.colors.clone();
-            let txn = db.begin_read()?;
-            let prefix = target.as_bytes().to_vec();
-            let mut end = Vec::from(prefix.as_slice());
-            end.push(u8::MAX);
+        std::thread::scope(|scope| {
+            let rx = if let Some(db) = &self.db {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let colors = self.colors.clone();
+                let prefix = target.as_bytes().to_vec();
+                let mut end = Vec::from(prefix.as_slice());
+                end.push(u8::MAX);
 
-            if force {
+                if force {
+                    let Ok(walk_root) = std::path::PathBuf::try_from(target.to_path_buf()) else {
+                        eyre::bail!("Could not convert to native path");
+                    };
+                    let args = args.clone();
+
+                    let table =
+                        db.keyspace(crate::core::TABLE_NAME, KeyspaceCreateOptions::default)?;
+                    // First, remove existing entries
+                    // let _ = table.retain_in(prefix.as_slice()..end.as_slice(), |_, _| false);
+
+                    for kv in table.prefix(target.as_bytes()) {
+                        table.remove(kv.key()?)?;
+                    }
+
+                    // Something is very wrong with this that causes the database to inflate
+                    // dramatically (>100x times)
+                    scope.spawn(move || -> Result<()> {
+                        for entry in spawn_walker(&colors, &args, Default::default(), &walk_root)? {
+                            let key = entry.path.as_bytes();
+                            let size = entry.size as u64;
+                            table.insert(key, size.to_be_bytes())?;
+                            tx.send(entry)?;
+                        }
+
+                        drop(table);
+                        db.persist(PersistMode::SyncAll)?;
+
+                        Ok(())
+                    });
+                } else {
+                    let table =
+                        db.keyspace(crate::core::TABLE_NAME, KeyspaceCreateOptions::default)?;
+                    scope.spawn(move || -> Result<()> {
+                        span!(Level::DEBUG, "Fetching entries from database").in_scope(|| {
+                            for kv in table.prefix(target.as_bytes()) {
+                                let (key, value) = kv.into_inner()?;
+                                let size = u64::from_be_bytes(value.as_slice().try_into()?);
+                                let entry = Entry::new_leaf(
+                                    TypedPath::from(key.as_slice()),
+                                    size as usize,
+                                    &colors,
+                                );
+                                tx.send(entry).unwrap();
+                            }
+
+                            Ok(())
+                        })
+                    });
+                }
+                rx
+            } else {
                 let Ok(walk_root) = std::path::PathBuf::try_from(target.to_path_buf()) else {
                     eyre::bail!("Could not convert to native path");
                 };
-                let args = args.clone();
-
-                let write_txn = db.begin_write()?;
-                let table = write_txn.open_table(crate::core::TABLE)?;
-                // First, remove existing entries
-                // let _ = table.retain_in(prefix.as_slice()..end.as_slice(), |_, _| false);
-
-                drop(table);
-                write_txn.commit()?;
-
-                let write_txn = db.begin_write()?;
-
-                // Something is very wrong with this that causes the database to inflate
-                // dramatically (>100x times)
-                std::thread::spawn(move || -> Result<()> {
-                    let mut table = write_txn.open_table(crate::core::TABLE)?;
-                    for entry in spawn_walker(&colors, &args, Default::default(), &walk_root)? {
-                        let key = entry.path.as_bytes();
-                        table.insert(key, &(entry.size as u64))?;
-                        tx.send(entry)?;
-                    }
-
-                    drop(table);
-                    write_txn.commit()?;
-
-                    Ok(())
-                });
-            } else {
-                std::thread::spawn(move || -> Result<()> {
-                    let table = txn.open_table(crate::core::TABLE)?;
-
-                    span!(Level::DEBUG, "Fetching entries from database").in_scope(|| {
-                        let mut iter = table.range(prefix.as_slice()..end.as_slice())?;
-                        while let Some(Ok((key, value))) = iter.next() {
-                            let entry = Entry::new_leaf(
-                                TypedPath::from(key.value()),
-                                value.value() as usize,
-                                &colors,
-                            );
-                            tx.send(entry).unwrap();
-                        }
-
-                        Ok(())
-                    })
-                });
-            }
-            rx
-        } else {
-            let Ok(walk_root) = std::path::PathBuf::try_from(target.to_path_buf()) else {
-                eyre::bail!("Could not convert to native path");
+                spawn_walker(&self.colors, &args, Default::default(), &walk_root)?
             };
-            spawn_walker(&self.colors, &args, Default::default(), &walk_root)?
-        };
 
-        let leaves = rx.into_iter().filter(filter);
-        let tree = span!(Level::DEBUG, "Rebuilding subtree")
-            .in_scope(|| par_forest(&self.colors, &args, state.root.to_path(), leaves, est_count));
-        Ok(tree)
+            let leaves = rx.into_iter().filter(filter);
+            let tree = span!(Level::DEBUG, "Rebuilding subtree").in_scope(|| {
+                par_forest(&self.colors, &args, state.root.to_path(), leaves, est_count)
+            });
+            Ok(tree)
+        })
     }
 
     fn refresh_root(&mut self, state: &mut AppState) -> Result<bool> {

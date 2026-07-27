@@ -20,7 +20,7 @@ pub type TreeSlice<'a> = &'a [(usize, Entry)];
 pub type LineageMap = HashMap<(TypedPathBuf, Option<Vec<u8>>), HashMap<TypedPathBuf, Entry>>;
 
 #[cfg(feature = "db")]
-pub const TABLE: redb::TableDefinition<&[u8], u64> = redb::TableDefinition::new("file_sizes");
+pub const TABLE_NAME: &str = "file_sizes";
 
 pub fn path_from_std(value: impl AsRef<Path>) -> TypedPathBuf {
     NativePath::new(value.as_ref().as_os_str().as_encoded_bytes()).to_typed_path_buf()
@@ -71,7 +71,7 @@ pub struct Entry {
 
     #[builder(default)]
     pub tag: Option<Vec<u8>>,
-    #[builder(default = 1)]
+    #[builder(default = 0)]
     pub nfiles: usize,
     #[builder(default = 1)]
     pub leaves: usize,
