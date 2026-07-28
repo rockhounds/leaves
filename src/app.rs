@@ -137,6 +137,62 @@ impl App {
             AppMode::Normal
         };
 
+        // #[cfg(feature = "db")]
+        // let _watcher: Result<_> = {
+        //     use std::time::Duration;
+        //
+        //     use notify_debouncer_full::{
+        //         DebounceEventResult, RecommendedCache, new_debouncer_opt, notify::*,
+        //     };
+        //
+        //     let mut debouncer = new_debouncer_opt::<_, INotifyWatcher, RecommendedCache>(
+        //         Duration::from_secs(2),
+        //         None,
+        //         |result: DebounceEventResult| match result {
+        //             Ok(events) => events
+        //                 .iter()
+        //                 .filter(|ev| !matches!(ev.kind, EventKind::Access(_)))
+        //                 .for_each(|event| tracing::info!("{event:?}")),
+        //             Err(errors) => errors.iter().for_each(|error| tracing::info!("{error:?}")),
+        //         },
+        //         RecommendedCache::new(),
+        //         Default::default(),
+        //     )?;
+        //
+        //     debouncer
+        //         .watch(&self.args.path, RecursiveMode::Recursive)
+        //         .expect("asdf");
+        //     Ok(debouncer)
+        // };
+
+        #[cfg(feature = "db")]
+        {
+            use std::{path::Path, sync::mpsc};
+
+            use notify_debouncer_full::notify::{self, RecursiveMode, Watcher as _};
+
+            let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
+
+            // Use recommended_watcher() to automatically select the best implementation
+            // for your platform. The `EventHandler` passed to this constructor can be a
+            // closure, a `std::sync::mpsc::Sender`, a `crossbeam_channel::Sender`, or
+            // another type the trait is implemented for.
+            let mut watcher = notify::PollWatcher::new(tx, notify::Config::default())?;
+
+            // Add a path to be watched. All files and directories at that path and
+            // below will be monitored for changes.
+            watcher.watch(Path::new("/etc"), RecursiveMode::Recursive)?;
+            // Block forever, printing out events as they come in
+            std::thread::spawn(move || {
+                for res in rx {
+                    match res {
+                        Ok(event) => tracing::info!("event: {:?}", event),
+                        Err(e) => tracing::warn!("watch error: {:?}", e),
+                    }
+                }
+            });
+        }
+
         let mut state = AppState::new(&self.args.path, mode);
 
         while !self.exit {
