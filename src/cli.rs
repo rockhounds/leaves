@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use color_eyre::Result;
+use crate::error::Result;
 
 #[cfg_attr(feature = "full-cli", derive(clap::Parser))]
 #[cfg_attr(feature = "full-cli", command(version, about, long_about = None))]
@@ -376,38 +376,44 @@ mod nano_parser_tests {
 }
 
 pub fn init_logging() -> Result<()> {
-    use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan, prelude::*};
+    #[cfg(not(feature = "diagnostics"))]
+    return Ok(());
 
-    let proj = env!("CARGO_CRATE_NAME").to_uppercase(); // need compile-time uppercase
-    let Some(log_dir_env) = std::env::var_os(format!("{proj}_LOG_DIR")) else {
-        return Ok(());
-    };
+    #[cfg(feature = "diagnostics")]
+    {
+        use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan, prelude::*};
 
-    let log_dir = Path::new(&log_dir_env);
-    std::fs::create_dir_all(log_dir)?;
+        let proj = env!("CARGO_CRATE_NAME").to_uppercase(); // need compile-time uppercase
+        let Some(log_dir_env) = std::env::var_os(format!("{proj}_LOG_DIR")) else {
+            return Ok(());
+        };
 
-    let log_path = log_dir.join("leaves.log");
+        let log_dir = Path::new(&log_dir_env);
+        std::fs::create_dir_all(log_dir)?;
 
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
+        let log_path = log_dir.join("leaves.log");
 
-    let filter = EnvFilter::from_default_env();
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?;
 
-    let file_subscriber = tracing_subscriber::fmt::layer()
-        .with_span_events(FmtSpan::CLOSE)
-        .with_file(true)
-        .with_line_number(true)
-        .with_writer(log_file)
-        .with_target(false)
-        .with_ansi(false)
-        .with_filter(filter.clone());
+        let filter = EnvFilter::from_default_env();
 
-    tracing_subscriber::registry()
-        .with(file_subscriber)
-        .with(filter)
-        .init();
+        let file_subscriber = tracing_subscriber::fmt::layer()
+            .with_span_events(FmtSpan::CLOSE)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(log_file)
+            .with_target(false)
+            .with_ansi(false)
+            .with_filter(filter.clone());
 
-    Ok(())
+        tracing_subscriber::registry()
+            .with(file_subscriber)
+            .with(filter)
+            .init();
+
+        Ok(())
+    }
 }

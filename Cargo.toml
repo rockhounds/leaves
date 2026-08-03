@@ -8,13 +8,13 @@ arboard = { version = "3.6.1", optional = true, features = [
   "wayland-data-control",
 ] }
 clap = { version = "4.6.1", optional = true, features = ["derive"] }
-color-eyre = "0.6.5"
+color-eyre = { version = "0.6.5", optional = true }
 colorgrad = { version = "0.8.0", features = ["preset"] }
 crossbeam-channel = "0.5.15"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 either = "1.16.0"
-eyre = "0.6.12"
+eyre = { version = "0.6.12", optional = true }
 humansize = "2.1.3"
 ignore = "0.4.26"
 itertools = "0.15.0"
@@ -24,8 +24,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 smallvec = "1.15.2"
 thousands = "0.2.0"
 toml = { version = "1.1.2", features = ["preserve_order"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = [
+tracing = { version = "0.1.44", optional = true }
+tracing-subscriber = { version = "0.3.23", optional = true, features = [
   "env-filter",
   "fmt",
   "json",
@@ -48,6 +48,12 @@ debug = true         # Full debug info for symbols
 strip = false        # Don't strip symbols
 
 [features]
-default = ["clipboard", "full-cli"]
+default = ["clipboard", "diagnostics", "full-cli"]
 clipboard = ["dep:arboard"]
+diagnostics = [
+  "dep:color-eyre",
+  "dep:eyre",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+]
 full-cli = ["dep:clap"]

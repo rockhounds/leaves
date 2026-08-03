@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use color_eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use humansize::{DECIMAL, format_size};
 use ignore::{WalkState, overrides::OverrideBuilder};
@@ -17,6 +16,7 @@ use ratatui::{
 use crate::cli::Args;
 use crate::colors::ColorScheme;
 use crate::core::{Entry, Forest};
+use crate::error::Result;
 use crate::forest::par_forest;
 
 #[derive(Default, Clone)]
@@ -40,7 +40,7 @@ pub fn spawn_walker(
     args: &Args,
     state: Arc<Mutex<ScanState>>,
     root: impl AsRef<Path>,
-) -> Result<mpsc::Receiver<Entry>, eyre::Error> {
+) -> Result<mpsc::Receiver<Entry>> {
     let (tx, rx) = mpsc::channel();
     let mut overrides = OverrideBuilder::new(&args.path);
     for glob in &args.overrides {
@@ -97,7 +97,7 @@ pub fn spawn_walker(
                             return WalkState::Quit;
                         }
                     }
-                    Err(err) => tracing::warn!("{}", err),
+                    Err(_err) => diag_warn!("{}", _err),
                 }
 
                 WalkState::Continue

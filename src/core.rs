@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fmt::Debug;
 use std::path::PathBuf;
 
+#[cfg(feature = "diagnostics")]
 use itertools::Itertools as _;
 use ratatui::style::Color;
 
@@ -92,9 +92,11 @@ impl From<&Entry> for EntryInfo {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 pub struct DbgEntry<'a>(pub &'a Entry);
 
-impl<'a> Debug for DbgEntry<'a> {
+#[cfg(feature = "diagnostics")]
+impl<'a> std::fmt::Debug for DbgEntry<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Entry")
             .field("path", &self.0.path)
@@ -106,19 +108,23 @@ impl<'a> Debug for DbgEntry<'a> {
 }
 
 // Lazy debugging wrapper for forests to avoid allocs if not logging.
+#[cfg(feature = "diagnostics")]
 pub struct DbgTrees<'a>(pub TreeSlice<'a>);
 
-impl<'a> Debug for DbgTrees<'a> {
+#[cfg(feature = "diagnostics")]
+impl<'a> std::fmt::Debug for DbgTrees<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tmp = self.0.iter().map(|(i, v)| (*i, DbgEntry(v))).collect_vec();
-        Debug::fmt(&tmp, f)
+        std::fmt::Debug::fmt(&tmp, f)
     }
 }
 
 // Lazy debugging wrapper for forests to avoid allocs if not logging.
+#[cfg(feature = "diagnostics")]
 pub struct CountedForest<'a>(pub TreeSlice<'a>);
 
-impl<'a> Debug for CountedForest<'a> {
+#[cfg(feature = "diagnostics")]
+impl<'a> std::fmt::Debug for CountedForest<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let n_trees = self.0.len();
         let size: usize = self.0.iter().map(|(_, it)| it.size).sum();

@@ -38,7 +38,7 @@ impl ColorScheme {
                     .html_colors(&spec.files)
                     .build::<BasisGradient>();
 
-                tracing::debug!(?dir_grad, ?ext_grad, "Decoded gradients");
+                diag_debug!(?dir_grad, ?ext_grad, "Decoded gradients");
 
                 Some((dir_grad.ok()?, ext_grad.ok()?))
             })

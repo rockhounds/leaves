@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::BTreeMap, env};
 
-use color_eyre::Result;
+use crate::error::Result;
 use serde::Deserialize;
 
 pub const PROJECT_NAME: &str = env!("CARGO_CRATE_NAME");
@@ -130,7 +130,7 @@ impl Config {
         };
 
         let config = toml::from_str(&text);
-        tracing::debug!(?config, "Loaded settings from file");
+        diag_debug!(?config, "Loaded settings from file");
         Ok(config?)
     }
 }

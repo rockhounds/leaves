@@ -5,13 +5,14 @@ use std::path::Path;
 
 use either::Either;
 use itertools::Itertools as _;
-use tracing::{Level, span};
 
 use crate::cli::Args;
 use crate::colors::ColorScheme;
+#[cfg(feature = "diagnostics")]
+use crate::core::{CountedForest, DbgEntry};
 use crate::core::{
-    CountedForest, DbgEntry, ENTRY_CHUNK_SIZE, Entry, Forest, LineageMap, MaybePair, StackAddr,
-    TreeSlice, cumsum_size, sort_largest,
+    ENTRY_CHUNK_SIZE, Entry, Forest, LineageMap, MaybePair, StackAddr, TreeSlice, cumsum_size,
+    sort_largest,
 };
 
 pub struct LeafIterator {
@@ -122,7 +123,7 @@ pub fn prune_entry(
     // Traverse twice instead of using a parent var to appease borrow checker
     // Could also use an parent + Some(child_idx) to represent cursor, but that just makes
     // the single traversal more complicated for little practical gain.
-    tracing::debug!(?view_addr, "Pruning entry at address");
+    diag_debug!(?view_addr, "Pruning entry at address");
 
     let mut addr = Vec::new();
     let mut cursor = &*forest;
@@ -135,7 +136,7 @@ pub fn prune_entry(
         }
     }
 
-    tracing::debug!(?addr, "Resolved view to indices");
+    diag_debug!(?addr, "Resolved view to indices");
 
     // Second traversal to the parent Vec, then splice out the entry
     // to ensure we don't leave dangling empty directories that will
@@ -147,7 +148,7 @@ pub fn prune_entry(
         }
 
         let (_, entry) = cursor.remove(last_idx);
-        tracing::debug!(entry=?DbgEntry(&entry), "Extracted entry from tree");
+        diag_debug!(entry=?DbgEntry(&entry), "Extracted entry from tree");
 
         // And now a third pass to fix all the counters for surgical edits
         let mut cursor = &mut *forest;
@@ -160,7 +161,7 @@ pub fn prune_entry(
             cursor = &mut cursor[*idx].1.subtree;
         }
 
-        tracing::debug!("Fixed ancestor counts");
+        diag_debug!("Fixed ancestor counts");
 
         Either::Left(entry)
     } else {
@@ -274,7 +275,7 @@ pub fn make_forest(
     let mut kidding = kidding;
 
     if args.xray {
-        tracing::debug!(
+        diag_debug!(
             "making x-ray forest with {} extensions ({:?}...) from {} nodes",
             extensions.len(),
             extensions.iter().take(10).collect_vec(),
@@ -289,7 +290,7 @@ pub fn make_forest(
                 let nfiles = subtree.iter().map(|(_, it)| it.nfiles).sum();
                 let leaves = subtree.iter().map(|(_, it)| it.leaves).sum();
 
-                tracing::trace!(ft = ?CountedForest(&subtree), "x-ray for {}", ext.display());
+                diag_trace!(ft = ?CountedForest(&subtree), "x-ray for {}", ext.display());
 
                 let label = if ext.is_empty() {
                     "(none)".into()
@@ -312,7 +313,7 @@ pub fn make_forest(
             })
             .collect_vec();
 
-        tracing::debug!("Rolled up entries into {} trees", entries.len());
+        diag_debug!("Rolled up entries into {} trees", entries.len());
 
         cumsum_size(sort_largest(entries))
     } else {
@@ -480,7 +481,7 @@ pub fn par_forest(
 
     let num_threads = num_workers.map(|x| x.min(num_cores)).unwrap_or(num_cores);
 
-    tracing::info!("Building forest in parallel with {num_threads} workers");
+    diag_info!("Building forest in parallel with {num_threads} workers");
     if num_threads <= 1 {
         return make_forest(colors, args, root, leaves);
     }
@@ -515,20 +516,20 @@ pub fn par_forest(
 
         // Reduction loop to a single forest
         loop {
-            let mut results = span!(Level::DEBUG, "joining threads").in_scope(|| {
+            let mut results = diag_span!(DEBUG, "joining threads").in_scope(|| {
                 handles
                     .into_iter()
                     .map(|h| match h {
                         Either::Left(h) => h.join().expect("Couldn't join threads"),
                         Either::Right(v) => v,
                     })
-                    .inspect(|forest| {
-                        tracing::trace!(forest = ?CountedForest(forest), "Make/merge forest result.")
+                    .inspect(|_forest| {
+                        diag_trace!(forest = ?CountedForest(_forest), "Make/merge forest result.")
                     })
                     .collect_vec()
             });
 
-            tracing::debug!(
+            diag_debug!(
                 shards = results.len(),
                 "Forest workers done. Merging results."
             );
