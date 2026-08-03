@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use glob_set::{Glob, GlobMap, GlobMapBuilder};
@@ -19,6 +21,7 @@ enum Decision {
 
 #[derive(Clone, Debug)]
 struct Rule {
+    #[cfg(test)]
     base: PathBuf,
     pattern: String,
     decision: Decision,
@@ -49,8 +52,10 @@ impl Rule {
                 });
         }
 
-        Glob::new(&self.pattern)
-            .is_ok_and(|glob| glob.compile_matcher().is_match(slash_path(relative)))
+        Glob::new(&self.pattern).is_ok_and(|glob| {
+            glob.compile_matcher()
+                .is_match(slash_path(relative).as_ref())
+        })
     }
 }
 
@@ -152,9 +157,9 @@ impl RuleScope {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RuleSet {
-    scopes: Vec<RuleScope>,
+    scopes: Vec<Arc<RuleScope>>,
 }
 
 impl RuleSet {
@@ -171,7 +176,7 @@ impl RuleSet {
         rules: &[Rule],
     ) -> std::result::Result<(), glob_set::Error> {
         if !rules.is_empty() {
-            self.scopes.push(RuleScope::new(base, rules)?);
+            self.scopes.push(Arc::new(RuleScope::new(base, rules)?));
         }
         Ok(())
     }
@@ -189,7 +194,7 @@ impl RuleSet {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Rules {
     ignore: RuleSet,
     gitignore: RuleSet,
@@ -197,31 +202,7 @@ struct Rules {
     git_global: RuleSet,
 }
 
-#[derive(Clone, Copy)]
-struct RuleCheckpoint {
-    ignore: usize,
-    gitignore: usize,
-    git_exclude: usize,
-    git_global: usize,
-}
-
-struct RepositorySwitch {
-    previous: Option<Repository>,
-    gitignore: RuleSet,
-    git_exclude: RuleSet,
-    git_global: RuleSet,
-}
-
 impl Rules {
-    fn checkpoint(&self) -> RuleCheckpoint {
-        RuleCheckpoint {
-            ignore: self.ignore.scopes.len(),
-            gitignore: self.gitignore.scopes.len(),
-            git_exclude: self.git_exclude.scopes.len(),
-            git_global: self.git_global.scopes.len(),
-        }
-    }
-
     fn matched(&self, path: &Path, is_dir: bool, in_git: bool) -> Option<Decision> {
         self.ignore
             .matched(path, is_dir)
@@ -243,6 +224,7 @@ impl Rules {
     }
 }
 
+#[derive(Clone)]
 struct Overrides {
     rules: RuleSet,
     has_includes: bool,
@@ -272,11 +254,28 @@ impl Overrides {
     }
 }
 
+#[derive(Clone)]
 struct Repository {
     root: PathBuf,
     git_dir: PathBuf,
 }
 
+struct WalkTask {
+    path: PathBuf,
+    file_type: fs::FileType,
+}
+
+struct DirectoryTask {
+    walker: Walker,
+    dir: PathBuf,
+}
+
+enum QueueMessage {
+    Directory(DirectoryTask),
+    Stop,
+}
+
+#[derive(Clone)]
 struct Walker {
     colors: ColorScheme,
     args: Args,
@@ -310,7 +309,7 @@ pub(super) fn spawn_walker(
 
     std::thread::spawn(move || {
         if root.is_dir() {
-            let _ = walker.walk_dir(&root);
+            let _ = walker.walk_root_parallel(&root);
         } else {
             let _ = walker.walk_root_file(&root);
         }
@@ -319,6 +318,62 @@ pub(super) fn spawn_walker(
 }
 
 impl Walker {
+    fn walk_root_parallel(&mut self, dir: &Path) -> bool {
+        let worker_count = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let (queue_tx, queue_rx) = crossbeam_channel::unbounded();
+        let pending = AtomicUsize::new(1);
+        let cancelled = AtomicBool::new(false);
+        queue_tx
+            .send(QueueMessage::Directory(DirectoryTask {
+                walker: self.clone(),
+                dir: dir.to_path_buf(),
+            }))
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let queue_tx = queue_tx.clone();
+                let queue_rx = queue_rx.clone();
+                let pending = &pending;
+                let cancelled = &cancelled;
+                scope.spawn(move || {
+                    while let Ok(message) = queue_rx.recv() {
+                        let QueueMessage::Directory(mut task) = message else {
+                            break;
+                        };
+
+                        let children = if cancelled.load(Ordering::Relaxed) {
+                            Vec::new()
+                        } else {
+                            match task.walker.walk_directory(&task.dir) {
+                                Some(children) => children,
+                                None => {
+                                    cancelled.store(true, Ordering::Relaxed);
+                                    Vec::new()
+                                }
+                            }
+                        };
+
+                        pending.fetch_add(children.len(), Ordering::Relaxed);
+                        for child in children {
+                            let _ = queue_tx.send(QueueMessage::Directory(child));
+                        }
+
+                        if pending.fetch_sub(1, Ordering::AcqRel) == 1 {
+                            for _ in 0..worker_count {
+                                let _ = queue_tx.send(QueueMessage::Stop);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        !cancelled.load(Ordering::Relaxed)
+    }
+
     fn walk_root_file(&mut self, path: &Path) -> bool {
         let metadata = match fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => metadata,
@@ -373,26 +428,18 @@ impl Walker {
         }
     }
 
-    fn walk_dir(&mut self, dir: &Path) -> bool {
-        let checkpoint = self.rules.checkpoint();
-        let repository_switch = self.enter_repository(dir);
-
-        if !self.args.include_ignored {
-            self.rules.ignore.add_file(&dir.join(".ignore"), dir);
-        }
-        if self.repository.is_some() && !self.args.include_gitignored {
-            self.rules.gitignore.add_file(&dir.join(".gitignore"), dir);
-        }
+    fn walk_directory(&mut self, dir: &Path) -> Option<Vec<DirectoryTask>> {
+        self.enter_repository(dir);
+        self.load_directory_rules(dir);
 
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(_error) => {
                 diag_warn!("{}: {_error}", dir.display());
-                self.leave_dir(checkpoint, repository_switch);
-                return true;
+                return Some(Vec::new());
             }
         };
-
+        let mut directories = Vec::new();
         for result in entries {
             let entry = match result {
                 Ok(entry) => entry,
@@ -409,70 +456,85 @@ impl Walker {
                     continue;
                 }
             };
-            let is_dir = file_type.is_dir();
-            let is_file = file_type.is_file();
-            if !is_dir && !is_file {
+            if !file_type.is_dir() && !file_type.is_file() {
                 continue;
             }
-
-            let override_decision = self.overrides.matched(&path, is_dir);
-            if override_decision == Some(Decision::Exclude) {
-                continue;
+            match self.walk_task(WalkTask { path, file_type }) {
+                TaskResult::Continue => {}
+                TaskResult::Directory(dir) => directories.push(DirectoryTask {
+                    walker: self.clone(),
+                    dir,
+                }),
+                TaskResult::Cancel => return None,
             }
-            let explicitly_included = override_decision == Some(Decision::Include);
-            if !explicitly_included {
-                if self.overrides.has_includes && is_file {
-                    continue;
-                }
-                let ignore_decision = self.rules.matched(&path, is_dir, self.repository.is_some());
-                if ignore_decision == Some(Decision::Exclude) {
-                    continue;
-                }
-                if ignore_decision.is_none()
-                    && !self.args.include_hidden
-                    && is_hidden(entry.file_name().as_os_str())
-                {
-                    continue;
-                }
-            }
+        }
+        Some(directories)
+    }
 
+    fn load_directory_rules(&mut self, dir: &Path) {
+        if !self.args.include_ignored {
+            self.rules.ignore.add_file(&dir.join(".ignore"), dir);
+        }
+        if self.repository.is_some() && !self.args.include_gitignored {
+            self.rules.gitignore.add_file(&dir.join(".gitignore"), dir);
+        }
+    }
+
+    fn walk_task(&mut self, task: WalkTask) -> TaskResult {
+        let WalkTask { path, file_type } = task;
+        let is_dir = file_type.is_dir();
+        let is_file = file_type.is_file();
+        let override_decision = self.overrides.matched(&path, is_dir);
+        if override_decision == Some(Decision::Exclude) {
+            return TaskResult::Continue;
+        }
+        let explicitly_included = override_decision == Some(Decision::Include);
+        if !explicitly_included {
+            if self.overrides.has_includes && is_file {
+                return TaskResult::Continue;
+            }
+            let ignore_decision = self.rules.matched(&path, is_dir, self.repository.is_some());
+            if ignore_decision == Some(Decision::Exclude) {
+                return TaskResult::Continue;
+            }
+            if ignore_decision.is_none()
+                && !self.args.include_hidden
+                && path.file_name().is_some_and(is_hidden)
             {
-                let mut state = self.state.lock().unwrap();
-                state.count += 1;
-                state.path = path.clone();
-            }
-
-            if is_dir {
-                if !self.args.cross_fs
-                    && self
-                        .root_device
-                        .zip(device_id(&path))
-                        .is_some_and(|(root, child)| root != child)
-                {
-                    continue;
-                }
-                if !self.walk_dir(&path) {
-                    self.leave_dir(checkpoint, repository_switch);
-                    return false;
-                }
-                continue;
-            }
-
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(_error) => {
-                    diag_warn!("{}: {_error}", path.display());
-                    continue;
-                }
-            };
-            if !self.send_file(path, metadata.len() as usize) {
-                self.leave_dir(checkpoint, repository_switch);
-                return false;
+                return TaskResult::Continue;
             }
         }
 
-        self.leave_dir(checkpoint, repository_switch);
-        true
+        {
+            let mut state = self.state.lock().unwrap();
+            state.count += 1;
+            state.path = path.clone();
+        }
+
+        if is_dir {
+            if !self.args.cross_fs
+                && self
+                    .root_device
+                    .zip(device_id(&path))
+                    .is_some_and(|(root, child)| root != child)
+            {
+                return TaskResult::Continue;
+            }
+            return TaskResult::Directory(path);
+        }
+
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_error) => {
+                diag_warn!("{}: {_error}", path.display());
+                return TaskResult::Continue;
+            }
+        };
+        if self.send_file(path, metadata.len() as usize) {
+            TaskResult::Continue
+        } else {
+            TaskResult::Cancel
+        }
     }
 
     fn send_file(&mut self, path: PathBuf, size: usize) -> bool {
@@ -496,49 +558,34 @@ impl Walker {
             .is_ok()
     }
 
-    fn enter_repository(&mut self, dir: &Path) -> Option<RepositorySwitch> {
+    fn enter_repository(&mut self, dir: &Path) {
         if self
             .repository
             .as_ref()
             .is_some_and(|repository| repository.root == dir)
         {
-            return None;
+            return;
         }
-        let repository = repository_at(dir)?;
-
-        let repository_switch = RepositorySwitch {
-            previous: self.repository.replace(repository),
-            gitignore: std::mem::take(&mut self.rules.gitignore),
-            git_exclude: std::mem::take(&mut self.rules.git_exclude),
-            git_global: std::mem::take(&mut self.rules.git_global),
+        let Some(repository) = repository_at(dir) else {
+            return;
         };
+        self.repository = Some(repository);
+        self.rules.gitignore = RuleSet::default();
+        self.rules.git_exclude = RuleSet::default();
+        self.rules.git_global = RuleSet::default();
         self.load_repository_rules();
-        Some(repository_switch)
-    }
-
-    fn leave_dir(
-        &mut self,
-        checkpoint: RuleCheckpoint,
-        repository_switch: Option<RepositorySwitch>,
-    ) {
-        self.rules.ignore.scopes.truncate(checkpoint.ignore);
-        if let Some(repository_switch) = repository_switch {
-            self.repository = repository_switch.previous;
-            self.rules.gitignore = repository_switch.gitignore;
-            self.rules.git_exclude = repository_switch.git_exclude;
-            self.rules.git_global = repository_switch.git_global;
-        } else {
-            self.rules.gitignore.scopes.truncate(checkpoint.gitignore);
-            self.rules
-                .git_exclude
-                .scopes
-                .truncate(checkpoint.git_exclude);
-            self.rules.git_global.scopes.truncate(checkpoint.git_global);
-        }
     }
 }
 
+enum TaskResult {
+    Continue,
+    Directory(PathBuf),
+    Cancel,
+}
+
 fn parse_rule(line: &str, base: &Path, override_rule: bool) -> Option<Rule> {
+    #[cfg(not(test))]
+    let _ = base;
     let mut pattern = trim_unescaped_spaces(line.trim_end_matches('\r'));
     if pattern.is_empty() || pattern.starts_with('#') {
         return None;
@@ -583,6 +630,7 @@ fn parse_rule(line: &str, base: &Path, override_rule: bool) -> Option<Rule> {
     };
 
     Some(Rule {
+        #[cfg(test)]
         base: base.to_path_buf(),
         pattern,
         decision,
@@ -634,8 +682,13 @@ fn validate_override(pattern: &str) -> Result<()> {
     .into())
 }
 
-fn slash_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+fn slash_path(path: &Path) -> Cow<'_, str> {
+    let path = path.to_string_lossy();
+    if path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        path
+    }
 }
 
 fn is_hidden(name: &OsStr) -> bool {
@@ -789,7 +842,7 @@ mod tests {
         spawn_walker(&colors, args, Default::default(), root)
             .unwrap()
             .into_iter()
-            .map(|entry| slash_path(entry.path.strip_prefix(root).unwrap()))
+            .map(|entry| slash_path(entry.path.strip_prefix(root).unwrap()).into_owned())
             .collect()
     }
 
@@ -813,7 +866,7 @@ mod tests {
                     .is_some_and(|file_type| file_type.is_file())
             })
             .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
-            .map(|entry| slash_path(entry.path().strip_prefix(root).unwrap()))
+            .map(|entry| slash_path(entry.path().strip_prefix(root).unwrap()).into_owned())
             .collect()
     }
 
