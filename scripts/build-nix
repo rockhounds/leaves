@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+variant="${1:-nano}"
+target="${2:-all}"
+output_root="${LEAVES_BUILD_DIR:-build/nix}"
+
+case "$variant" in
+  default|mini|nano) ;;
+  *)
+    echo "unknown variant: $variant (expected default, mini, or nano)" >&2
+    exit 2
+    ;;
+esac
+
+build_target() {
+  local target_name="$1"
+  local flake_attr
+
+  case "$target_name" in
+    macos) flake_attr="$variant.macos" ;;
+    linux-gnu) flake_attr="$variant.linux.gnu" ;;
+    linux-musl) flake_attr="$variant.linux.musl" ;;
+    *)
+      echo "unknown target: $target_name (expected all, macos, linux-gnu, or linux-musl)" >&2
+      exit 2
+      ;;
+  esac
+
+  mkdir -p "$output_root/$variant"
+  nix build \
+    --out-link "$output_root/$variant/$target_name" \
+    ".#$flake_attr"
+
+  echo "$target_name: $output_root/$variant/$target_name/bin/leaves"
+}
+
+if [[ "$target" == "all" ]]; then
+  build_target macos
+  build_target linux-gnu
+  build_target linux-musl
+else
+  build_target "$target"
+fi

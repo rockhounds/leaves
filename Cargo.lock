@@ -854,6 +854,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
+name = "glob-matcher"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "464c48cc775f1b72d181e9b8b98d8231b2df1550b627e62bb63a172972e9a67c"
+
+[[package]]
+name = "glob-set"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80445d8097e34c933c6dbaf44b395b187588b1d5be2df27777dbff53e3b03b74"
+dependencies = [
+ "aho-corasick",
+ "glob-matcher",
+ "hashbrown 0.16.1",
+ "tried",
+]
+
+[[package]]
 name = "globset"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1086,6 +1104,7 @@ dependencies = [
  "dirs",
  "either",
  "eyre",
+ "glob-set",
  "humansize",
  "ignore",
  "itertools 0.15.0",
@@ -2487,6 +2506,15 @@ dependencies = [
  "memchr",
  "nom 8.0.0",
  "petgraph",
+]
+
+[[package]]
+name = "tried"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61d82da6e6a4addbe21504e6f70bd966e49aa42f1572b7e84aede7c5adf993dd"
+dependencies = [
+ "hashbrown 0.16.1",
 ]
 
 [[package]]

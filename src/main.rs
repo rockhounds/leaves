@@ -1,13 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use color_eyre::Result;
-use tracing::{Level, instrument, span};
+#[macro_use]
+mod diagnostics;
 
 mod app;
 mod cli;
 mod colors;
 mod config;
 mod core;
+mod error;
 mod explorer;
 mod forest;
 mod render;
@@ -17,16 +18,16 @@ mod state;
 use app::App;
 use cli::{Args, init_logging};
 use config::Config;
+use error::Result;
 use scanfs::{ScanState, ScanUI, walk_fs};
 
 use crate::colors::ColorScheme;
 
-#[instrument]
+#[cfg_attr(feature = "diagnostics", tracing::instrument)]
 fn main() -> Result<()> {
     init_logging()?;
-    color_eyre::install()?;
+    error::install_handler()?;
 
-    use clap::Parser as _;
     let mut args = Args::parse();
 
     if args.include_all {
@@ -40,7 +41,7 @@ fn main() -> Result<()> {
     let scheme = ColorScheme::new(&config);
 
     args.path = args.path.canonicalize()?;
-    tracing::info!(?config, ?args, "App config");
+    diag_info!(?config, ?args, "App config");
 
     let scan_state = Arc::new(Mutex::new(ScanState::default()));
 
@@ -56,22 +57,20 @@ fn main() -> Result<()> {
         })
     };
 
-    let quit = span!(Level::DEBUG, "Scanning")
+    let quit = diag_span!(DEBUG, "Scanning")
         .in_scope(|| ratatui::run(|term| ScanUI::new(scan_state).run(term)))?;
     if quit {
         return Ok(());
     }
 
-    let scanned = span!(Level::DEBUG, "Gathering scan results").in_scope(|| {
-        th.join()
-            .map_err(|_e| eyre::eyre!("Failed to join scanner thread"))
-    })??;
+    let scanned = diag_span!(DEBUG, "Gathering scan results")
+        .in_scope(|| th.join().map_err(|_e| error::thread_join_error()))??;
 
     // After initial scan, default this to 1 for on-demand expansion
     args.max_depth = 1;
 
-    let mut app = span!(Level::DEBUG, "Initializing app")
-        .in_scope(|| App::new(config, scheme, args, scanned));
+    let mut app =
+        diag_span!(DEBUG, "Initializing app").in_scope(|| App::new(config, scheme, args, scanned));
 
     ratatui::run(|terminal| app.run(terminal))
 }

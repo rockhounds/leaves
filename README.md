@@ -58,6 +58,19 @@ Use the cargo build tool to compile the application:
 $ cargo build --release
 ```
 
+Nix builds can be placed under `build/nix` with the repository helper:
+
+```bash
+# Build nano for macOS, Linux GNU, and Linux musl
+$ scripts/build-nix nano
+
+# Build one target
+$ scripts/build-nix nano macos
+```
+
+The first command creates `build/nix/nano/{macos,linux-gnu,linux-musl}`.
+Use `default` or `mini` instead of `nano` to build those variants.
+
 Cargo can also install the application for your current user:
 
 ```bash

@@ -3,7 +3,6 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use color_eyre::Result;
 use crossterm::{
     ExecutableCommand as _,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind},
@@ -22,9 +21,11 @@ use ratatui::{
     },
 };
 use thousands::Separable;
-use tracing::{Level, instrument, span};
 use tui_tree_widget::{Scrollbar, Tree, TreeItem};
 
+#[cfg(feature = "diagnostics")]
+use crate::core::{DbgEntry, DbgTrees};
+use crate::error::Result;
 use crate::explorer::build_nav_tree;
 use crate::forest::{
     deforest, make_forest, merge_forests, par_forest, prune_entry, recumsum_forest, tree_find_path,
@@ -37,7 +38,7 @@ use crate::state::{
 use crate::{cli::Args, config::Config};
 use crate::{
     colors::ColorScheme,
-    core::{DbgEntry, DbgTrees, ENTRY_CHUNK_SIZE, Entry, EntryInfo, Forest, StackAddr},
+    core::{ENTRY_CHUNK_SIZE, Entry, EntryInfo, Forest, StackAddr},
 };
 
 struct MouseyTerm<'a>(&'a mut DefaultTerminal);
@@ -92,10 +93,13 @@ pub struct App {
 }
 
 impl App {
-    #[instrument(level = "debug", skip_all)]
+    #[cfg_attr(
+        feature = "diagnostics",
+        tracing::instrument(level = "debug", skip_all)
+    )]
     pub fn new(config: Config, colors: ColorScheme, args: Args, entries: Forest) -> Self {
         let tree_items = build_nav_tree(entries.as_slice());
-        let focus = span!(Level::DEBUG, "Wrapping initial tree focus").in_scope(|| {
+        let focus = diag_span!(DEBUG, "Wrapping initial tree focus").in_scope(|| {
             TreeFocusBuilder {
                 tree: entries,
                 focus_builder: |_| None,
@@ -133,7 +137,7 @@ impl App {
             }
 
             if state.view_info.is_none() {
-                span!(Level::DEBUG, "Refreshing view info").in_scope(|| {
+                diag_span!(DEBUG, "Refreshing view info").in_scope(|| {
                     let info = self.view_info(&state);
 
                     let title = get_title(&state, &info);
@@ -143,7 +147,7 @@ impl App {
             }
 
             if !state.click_addr.is_empty() {
-                span!(Level::DEBUG, "Updating selection from area click").in_scope(|| {
+                diag_span!(DEBUG, "Updating selection from area click").in_scope(|| {
                     let addr = std::mem::take(&mut state.click_addr);
                     let mut selection = state.skip_view.clone();
                     selection.extend_from_slice(&addr);
@@ -370,11 +374,11 @@ impl App {
             && let Some(clipboard) = &mut state.clipboard
         {
             let text = path.display().to_string();
-            tracing::info!(text, "Attempting to copy path to clipboard");
+            diag_info!(text, "Attempting to copy path to clipboard");
 
-            let result = clipboard.set_text(text);
+            let _result = clipboard.set_text(text);
 
-            tracing::debug!(?result, "Clipboard result");
+            diag_debug!(result = ?_result, "Clipboard result");
         }
 
         let mut info_lines = vec![];
@@ -546,7 +550,7 @@ impl App {
             KeyCode::Left => {
                 let dirty = state.tree_state.key_left();
 
-                tracing::debug!(sel=?state.tree_state.selected(), qual=?state.qual_select(), "Key left");
+                diag_debug!(sel=?state.tree_state.selected(), qual=?state.qual_select(), "Key left");
                 dirty
             }
             KeyCode::Right => state.tree_state.key_right(),
@@ -593,18 +597,18 @@ impl App {
             let old_nav = std::mem::take(&mut self.tree_items);
 
             std::thread::spawn(move || {
-                span!(Level::DEBUG, "Dropping old navigator tree").in_scope(|| drop(old_nav))
+                diag_span!(DEBUG, "Dropping old navigator tree").in_scope(|| drop(old_nav))
             });
         }
 
         // Careful here. Plain assignment generates a large chunk of overhead (drop/dealloc?).
-        span!(Level::DEBUG, "Synchronizing view", addr=?state.skip_view).in_scope(|| {
+        diag_span!(DEBUG, "Synchronizing view", addr=?state.skip_view).in_scope(|| {
             // self.tree_items = build_nav_tree(self.get_view(state));
             self.tree_items.clear();
             self.tree_items.extend(build_nav_tree(self.get_view(state)));
         });
 
-        tracing::debug!(items = self.tree_items.len(), "Rebuilt navigator tree");
+        diag_debug!(items = self.tree_items.len(), "Rebuilt navigator tree");
 
         state.show_selection(&self.selection);
 
@@ -661,7 +665,10 @@ impl App {
             })
     }
 
-    #[instrument(skip_all, fields(action = ?state.action))]
+    #[cfg_attr(
+        feature = "diagnostics",
+        tracing::instrument(skip_all, fields(action = ?state.action))
+    )]
     fn handle_action(
         &mut self,
         terminal: &mut DefaultTerminal,
@@ -727,7 +734,7 @@ impl App {
                     }
                 };
 
-                tracing::info!(
+                diag_info!(
                     ?restore_view,
                     ?restore_path,
                     ?restore_tag,
@@ -769,7 +776,7 @@ impl App {
                 state.tree_state = Default::default();
                 state.skip_view = Default::default();
 
-                span!(Level::DEBUG, "Restoring view.").in_scope(|| {
+                diag_span!(DEBUG, "Restoring view.").in_scope(|| {
                     if let Some(path) = restore_view
                         && let Some(addr) = tree_find_path(
                             self.entries.borrow_tree(),
@@ -782,7 +789,7 @@ impl App {
                     }
                 });
 
-                span!(Level::DEBUG, "Restoring selection.").in_scope(|| {
+                diag_span!(DEBUG, "Restoring selection.").in_scope(|| {
                     if let Some(path) = restore_path
                         && let Some(addr) = tree_find_path(
                             self.entries.borrow_tree(),
@@ -798,7 +805,7 @@ impl App {
 
                 self.sync_view(state);
 
-                tracing::debug!("Done with switch.");
+                diag_debug!("Done with switch.");
             }
             AppAction::Deflate => {
                 let mut selection = state.qual_select();
@@ -904,7 +911,7 @@ impl App {
             *focus
         };
 
-        tracing::debug!("Expanding node {:?}", DbgEntry(focus));
+        diag_debug!("Expanding node {:?}", DbgEntry(focus));
         if focus.subtree.is_empty() || focus.is_group {
             return Ok(false);
         }
@@ -921,17 +928,19 @@ impl App {
             }
         });
 
+        #[cfg(feature = "diagnostics")]
         let init_root = self.args.path.canonicalize()?;
         let rel_target = target.strip_prefix(&state.root)?;
         let depth = rel_target.components().count();
-        tracing::debug!("Rescanning {target:?}. Root {init_root:?}. tag {tag:?}. depth {depth}");
+        diag_debug!("Rescanning {target:?}. Root {init_root:?}. tag {tag:?}. depth {depth}");
         let args = self.args.with_depth(depth + self.args.max_depth);
         let entries = std::mem::take(&mut self.entries);
         let mut forest = entries.into_heads().tree;
-        let pruned = prune_entry(&mut forest, &selection);
-        match pruned {
-            Either::Left(it) => tracing::debug!("Pruned entry {:?}", DbgEntry(&it)),
-            Either::Right(subtree) => tracing::debug!("Pruned {} subtrees", subtree.len()),
+        let _pruned = prune_entry(&mut forest, &selection);
+        #[cfg(feature = "diagnostics")]
+        match &_pruned {
+            Either::Left(it) => diag_debug!("Pruned entry {:?}", DbgEntry(it)),
+            Either::Right(subtree) => diag_debug!("Pruned {} subtrees", subtree.len()),
         }
         let rx = spawn_walker(&self.colors, &args, Default::default(), &target)?;
         let leaves = rx.into_iter().filter(|it| {
@@ -940,7 +949,7 @@ impl App {
                     || it.path.extension().unwrap_or_default() == tag.as_ref().unwrap())
         });
         let tree = make_forest(&self.colors, &args, &state.root, leaves);
-        tracing::debug!("Expanded subtree {:?}", DbgTrees(&tree));
+        diag_debug!("Expanded subtree {:?}", DbgTrees(&tree));
         let tree = merge_forests(forest, tree);
         self.entries = TreeFocusBuilder {
             tree,
@@ -952,9 +961,8 @@ impl App {
 
     fn refresh_root(&mut self, state: &mut AppState) -> Result<bool> {
         let init_root = self.args.path.canonicalize()?;
-        let state_root = &state.root;
         let nfiles = state.view_info.as_ref().map(|info| info.nfiles);
-        tracing::info!(?init_root, ?state_root, ?nfiles, "Refreshing root forest");
+        diag_info!(?init_root, state_root = ?state.root, ?nfiles, "Refreshing root forest");
 
         // Safety for the foot-gun. If you want to rescan from the top, quit and restart.
         if init_root == state.root {
@@ -977,7 +985,7 @@ impl App {
         }
         .build();
 
-        tracing::debug!("Done refreshing root");
+        diag_debug!("Done refreshing root");
 
         Ok(true)
     }

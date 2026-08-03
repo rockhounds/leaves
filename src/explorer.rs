@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "diagnostics")]
 use eyre::Context as _;
 use humansize::{DECIMAL, format_size};
 use itertools::Itertools as _;
 
-use tracing::{Level, instrument, span};
 use tui_tree_widget::TreeItem;
 
 use crate::core::{ENTRY_CHUNK_SIZE, Entry, StackAddr, TreeSlice};
 
-#[instrument(level = "debug", skip_all)]
+#[cfg_attr(
+    feature = "diagnostics",
+    tracing::instrument(level = "debug", skip_all)
+)]
 pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
     use crossbeam_channel::{Sender, unbounded};
     use itertools::Itertools as _;
@@ -28,7 +31,7 @@ pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
     let num_threads = num_workers.min(num_cores);
 
     if num_threads <= 1 {
-        return span!(Level::INFO, "skipping parallelism", num_leaves)
+        return diag_span!(INFO, "skipping parallelism", num_leaves)
             .in_scope(|| tree_items(entries));
     }
 
@@ -48,7 +51,7 @@ pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
         }
     }
 
-    span!(Level::DEBUG, "Splitting tree", num_leaves, num_threads).in_scope(|| {
+    diag_span!(DEBUG, "Splitting tree", num_leaves, num_threads).in_scope(|| {
         let addr = StackAddr::root();
         for (id, it) in entries {
             let addr = addr.push(*id);
@@ -57,7 +60,7 @@ pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
         drop(tx);
     });
 
-    let mut shards = span!(Level::DEBUG, "transforming subtrees").in_scope(|| {
+    let mut shards = diag_span!(DEBUG, "transforming subtrees").in_scope(|| {
         thread::scope(|ts| {
             let handles = (0..num_threads)
                 .map(|_| {
@@ -124,7 +127,7 @@ pub fn build_nav_tree(entries: TreeSlice) -> Vec<TreeItem<'static, usize>> {
         subtrees
     }
 
-    span!(Level::DEBUG, "combining shards")
+    diag_span!(DEBUG, "combining shards")
         .in_scope(|| combine_shards(&smallvec![], entries, &mut shards))
 }
 
@@ -157,7 +160,11 @@ fn make_tree_node(
         .cloned()
         .collect_vec();
 
-    TreeItem::new(id, text, subtree)
+    #[cfg(feature = "diagnostics")]
+    return TreeItem::new(id, text, subtree)
         .context(format!("{ids:?}"))
-        .unwrap()
+        .unwrap();
+
+    #[cfg(not(feature = "diagnostics"))]
+    TreeItem::new(id, text, subtree).unwrap_or_else(|err| panic!("{ids:?}: {err}"))
 }
