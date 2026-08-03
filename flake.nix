@@ -1,37 +1,83 @@
 {
-  description = "A very basic flake";
+  description = "leaves - A visual disk usage analyzer for terminal";
 
   inputs = {
-    self.submodules = true;
-    nixpkgs.url = "github:nixos/nixpkgs";
-    flake-compat.url = "github:edolstra/flake-compat";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    fenix_.url = "github:nix-community/fenix";
     gitignore-src.url = "github:hercules-ci/gitignore.nix";
-    naersk-src = {
-      url = "github:nix-community/naersk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix_, gitignore-src, naersk-src,  flake-compat }: 
+  outputs = { self, nixpkgs, flake-utils, gitignore-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        # pkgs = nixpkgs.legacyPackages.${system};
-        pkgs = (import nixpkgs) {
-          inherit system;
-          # overlays = [];
-        };
-        fenix = pkgs.callPackage fenix_ {};
-        naersk = pkgs.callPackage naersk-src {};
+        pkgs = import nixpkgs { inherit system; };
         gitignore = pkgs.callPackage gitignore-src {};
-        callPackage = pkgs.lib.callPackageWith {
-          inherit pkgs fenix naersk naersk-src gitignore;
-          inherit (gitignore) gitignoreSource;
+
+        packageVariants =
+          packagePkgs:
+          let
+            callLeaves =
+              args:
+              packagePkgs.callPackage ./package.nix ({
+                inherit gitignore;
+                # Native and cross compilers are the same pinned Rust release.
+                inherit (pkgs.rustPlatform) rustLibSrc rustVendorSrc;
+              } // args);
+          in
+          {
+            default = callLeaves {};
+            mini = callLeaves {
+              buildType = "mini";
+            };
+            nano = callLeaves {
+              buildType = "mini";
+              buildStd = true;
+              cargoBuildFlags = [ "--no-default-features" ];
+            };
+          };
+
+        nativePackages = packageVariants pkgs;
+        targetPackages = {
+          macos =
+            if pkgs.stdenv.hostPlatform.isDarwin
+            then nativePackages
+            else packageVariants pkgs.pkgsCross.aarch64-darwin;
+          linux = {
+            gnu =
+              if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isGnu
+              then nativePackages
+              else packageVariants pkgs.pkgsCross.gnu64;
+            musl =
+              if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isMusl
+              then nativePackages
+              else packageVariants pkgs.pkgsCross.musl64;
+          };
         };
+
+        multiPlatformPackage =
+          name:
+          let
+            macos = targetPackages.macos.${name};
+            linux = {
+              gnu = targetPackages.linux.gnu.${name};
+              musl = targetPackages.linux.musl.${name};
+            };
+          in
+          pkgs.runCommand "leaves-${name}-macos-linux" {
+            passthru = { inherit macos linux; };
+          } ''
+            mkdir -p $out/macos/bin $out/linux/gnu/bin $out/linux/musl/bin
+            ln -s ${macos}/bin/leaves $out/macos/bin/leaves
+            ln -s ${linux.gnu}/bin/leaves $out/linux/gnu/bin/leaves
+            ln -s ${linux.musl}/bin/leaves $out/linux/musl/bin/leaves
+          '';
       in
       {
-        packages = callPackage ./package.nix {};
+        packages = pkgs.lib.genAttrs (pkgs.lib.attrNames nativePackages) multiPlatformPackage;
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ nativePackages.default ];
+          packages = with pkgs; [ cargo rustc rust-analyzer clippy ];
+        };
       }
     );
 }
