@@ -33,6 +33,15 @@ tracing-subscriber = { version = "0.3.23", features = [
 ] }
 tui-tree-widget = "0.24.0"
 
+
+[profile.mini]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [profile.perf]
 inherits = "release"
 debug = true         # Full debug info for symbols
