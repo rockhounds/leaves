@@ -1,17 +1,19 @@
 use humansize::{DECIMAL, format_size};
 use ratatui::{
+    Frame,
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Color, Style, Stylize},
     symbols,
-    text::ToLine as _,
-    widgets::{Block, BorderType, Fill, Widget},
+    text::{Line, ToLine as _},
+    widgets::{Block, BorderType, Clear, Fill, Paragraph, Widget},
 };
+use thousands::Separable;
 
 use crate::state::AppState;
 use crate::{
     config::Config,
-    core::{Entry, MaybePair, StackAddr, TreeSlice},
+    core::{Entry, EntryInfo, MaybePair, StackAddr, TreeSlice},
 };
 use crate::{
     config::DirStyle,
@@ -184,4 +186,58 @@ pub fn render_entry(
     } else if inner.height > 2 || inner.width > 2 {
         render_subtree(config, state, addr, inner, buf, subtree, selection);
     }
+}
+
+pub fn render_delete_modal(frame: &mut Frame, info: &EntryInfo) {
+    let popup_area = frame.area().centered(
+        Constraint::Length(65),
+        Constraint::Length(10),
+    );
+
+    frame.render_widget(Clear, popup_area);
+
+    let is_dir = info.path.is_dir();
+    let item_type = if is_dir { "Directory" } else { "File" };
+    let path_str = info.path.display().to_string();
+
+    let text = vec![
+        Line::from(vec![
+            "REMOVE ".red().bold(),
+            item_type.into(),
+            "?".into(),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            "Path: ".yellow(),
+            path_str.into(),
+        ]),
+        Line::from(vec![
+            "Size: ".yellow(),
+            format_size(info.size, DECIMAL).bold(),
+            format!(" ({} files)", info.nfiles.separate_with_commas()).into(),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            "Press ".into(),
+            "y".red().bold(),
+            " / ".into(),
+            "Enter".red().bold(),
+            " to confirm, ".into(),
+            "n".green().bold(),
+            " / ".into(),
+            "Esc".green().bold(),
+            " to cancel".into(),
+        ]),
+    ];
+
+    let block = Block::bordered()
+        .title(" Confirm Deletion ".bold().red())
+        .title_alignment(ratatui::layout::Alignment::Center)
+        .border_style(Style::default().fg(Color::Red));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .centered();
+
+    frame.render_widget(paragraph, popup_area);
 }

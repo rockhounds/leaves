@@ -24,6 +24,9 @@ pub enum AppAction {
     SwitchMode(AppMode),
     Deflate,
     Expand,
+    PromptDelete,
+    ConfirmDelete,
+    CancelDelete,
 }
 
 #[derive(Default)]
@@ -45,6 +48,9 @@ pub struct AppState {
     pub click_pos: Option<Position>,
     pub click_area: Rect,
     pub click_addr: Vec<usize>,
+
+    pub pending_delete: Option<EntryInfo>,
+    pub status_msg: Option<String>,
 }
 
 impl AppState {

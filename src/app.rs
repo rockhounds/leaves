@@ -27,9 +27,9 @@ use tui_tree_widget::{Scrollbar, Tree, TreeItem};
 
 use crate::explorer::build_nav_tree;
 use crate::forest::{
-    deforest, make_forest, merge_forests, par_forest, prune_entry, tree_find_path,
+    deforest, make_forest, merge_forests, par_forest, prune_entry, recumsum_forest, tree_find_path,
 };
-use crate::render::render_subtree;
+use crate::render::{render_delete_modal, render_subtree};
 use crate::scanfs::spawn_walker;
 use crate::state::{
     AppAction, AppMode, AppState, TreeFocus, TreeFocusBuilder, get_selection, get_title,
@@ -300,8 +300,16 @@ impl App {
         let depth_help = &format!("depth[{}]", self.args.max_depth);
         status_line.push_span(depth_help.to_span());
 
+        status_line.push_span(" r".blue().bold());
+        status_line.push_span("emove ".to_span());
+
         status_line.push_span(" q".blue().bold());
         status_line.push_span("uit ".to_span());
+
+        if let Some(msg) = &state.status_msg {
+            status_line.push_span(" | ".to_span());
+            status_line.push_span(msg.clone().red().bold());
+        }
 
         window = window.title_bottom(status_line.centered());
 
@@ -429,6 +437,10 @@ impl App {
         }
 
         frame.render_stateful_widget(self, layout[1], state);
+
+        if let Some(info) = &state.pending_delete {
+            render_delete_modal(frame, info);
+        }
     }
 
     fn handle_events(&mut self, state: &mut AppState) -> Result<bool> {
@@ -439,21 +451,25 @@ impl App {
                 self.handle_key_event(state, key_event)
             }
             Event::Key(key_event) if key_event.kind == KeyEventKind::Press => false,
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollDown => state.tree_state.scroll_down(1),
-                MouseEventKind::ScrollUp => state.tree_state.scroll_up(1),
-                MouseEventKind::Down(_button) => {
-                    let position = Position::new(mouse.column, mouse.row);
-                    state.tree_state.click_at(position);
+            Event::Mouse(_) if state.pending_delete.is_some() => false,
+            Event::Mouse(mouse) => {
+                state.status_msg = None;
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => state.tree_state.scroll_down(1),
+                    MouseEventKind::ScrollUp => state.tree_state.scroll_up(1),
+                    MouseEventKind::Down(_button) => {
+                        let position = Position::new(mouse.column, mouse.row);
+                        state.tree_state.click_at(position);
 
-                    // This requires two cycles so we take advantage of the mouse up event
-                    state.click_pos = Some(position);
-                    state.click_addr.clear();
-                    true
+                        // This requires two cycles so we take advantage of the mouse up event
+                        state.click_pos = Some(position);
+                        state.click_addr.clear();
+                        true
+                    }
+                    MouseEventKind::Up(_button) => true,
+                    _ => false,
                 }
-                MouseEventKind::Up(_button) => true,
-                _ => false,
-            },
+            }
             Event::Resize(_, _) => true,
             _ => false,
         };
@@ -461,9 +477,36 @@ impl App {
         Ok(dirty)
     }
 
+    fn maybe_handle_delete_confirmation(&mut self, state: &mut AppState, key: KeyEvent) -> bool {
+        if state.pending_delete.is_none() {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                state.action = AppAction::ConfirmDelete;
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                state.action = AppAction::CancelDelete;
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn handle_key_event(&mut self, state: &mut AppState, key: KeyEvent) -> bool {
+        if self.maybe_handle_delete_confirmation(state, key) {
+            return true;
+        }
+
+        state.status_msg = None;
+
         match key.code {
             KeyCode::Char('q') => self.exit(),
+            KeyCode::Char('r') | KeyCode::Delete => {
+                state.action = AppAction::PromptDelete;
+                true
+            }
             KeyCode::Char('+' | '=') => {
                 self.args.max_depth += 1;
                 true
@@ -626,6 +669,17 @@ impl App {
     ) -> Result<()> {
         match std::mem::take(&mut state.action) {
             AppAction::Noop => {}
+            AppAction::PromptDelete => {
+                if let Some(focus) = self.entries.borrow_focus() {
+                    state.pending_delete = Some(EntryInfo::from(*focus));
+                }
+            }
+            AppAction::CancelDelete => {
+                state.pending_delete = None;
+            }
+            AppAction::ConfirmDelete => {
+                self.execute_delete(state)?;
+            }
             AppAction::SwitchMode(mode) => {
                 let restore_info = self.view_info(state);
                 let init_root = self.args.path.canonicalize()?;
@@ -926,6 +980,59 @@ impl App {
         tracing::debug!("Done refreshing root");
 
         Ok(true)
+    }
+
+    /// Prunes the currently selected node from the in-memory tree and updates cumulative size offsets.
+    fn prune_selected_node(&mut self, state: &AppState) {
+        let selection = state.qual_select();
+        let entries = std::mem::take(&mut self.entries);
+        let mut forest = entries.into_heads().tree;
+
+        let _ = prune_entry(&mut forest, &selection);
+        recumsum_forest(&mut forest);
+
+        self.entries = TreeFocusBuilder {
+            tree: forest,
+            focus_builder: |tree| get_selection(&selection, tree),
+        }
+        .build();
+    }
+
+    /// Rebuilds the navigator tree sidebar items and clears cached view state.
+    fn refresh_navigator_view(&mut self, state: &mut AppState) {
+        self.tree_items.clear();
+        self.tree_items.extend(build_nav_tree(self.get_view(state)));
+        state.view_info = None;
+        state.title = None;
+    }
+
+    /// Executes file or directory deletion on disk, handles partial success or error cases,
+    /// and updates the in-memory view accordingly.
+    fn execute_delete(&mut self, state: &mut AppState) -> Result<()> {
+        let Some(info) = state.pending_delete.take() else {
+            return Ok(());
+        };
+
+        let path = info.path.clone();
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+
+        let is_deleted = result.is_ok() || !path.exists();
+
+        if is_deleted {
+            self.prune_selected_node(state);
+            state.status_msg = Some(format!("Removed {}", path.display()));
+        } else if let Err(err) = result {
+            let _ = self.expand_selected(state);
+            tracing::error!(?err, path = %path.display(), "Deletion failed or partially completed");
+            state.status_msg = Some(format!("Failed to remove {}: {}", path.display(), err));
+        }
+
+        self.refresh_navigator_view(state);
+        Ok(())
     }
 }
 
