@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use humansize::{DECIMAL, format_size};
+#[cfg(feature = "full-scan")]
 use ignore::{WalkState, overrides::OverrideBuilder};
 use itertools::Itertools as _;
 use ratatui::{
@@ -18,6 +19,10 @@ use crate::colors::ColorScheme;
 use crate::core::{Entry, Forest};
 use crate::error::Result;
 use crate::forest::par_forest;
+
+#[cfg(not(feature = "full-scan"))]
+#[path = "nano_scan.rs"]
+mod nano;
 
 #[derive(Default, Clone)]
 pub struct ScanState {
@@ -36,6 +41,22 @@ pub fn walk_fs(colors: &ColorScheme, args: &Args, state: Arc<Mutex<ScanState>>) 
 }
 
 pub fn spawn_walker(
+    colors: &ColorScheme,
+    args: &Args,
+    state: Arc<Mutex<ScanState>>,
+    root: impl AsRef<Path>,
+) -> Result<mpsc::Receiver<Entry>> {
+    #[cfg(not(feature = "full-scan"))]
+    return nano::spawn_walker(colors, args, state, root);
+
+    #[cfg(feature = "full-scan")]
+    {
+        spawn_full_walker(colors, args, state, root)
+    }
+}
+
+#[cfg(feature = "full-scan")]
+fn spawn_full_walker(
     colors: &ColorScheme,
     args: &Args,
     state: Arc<Mutex<ScanState>>,
