@@ -7,7 +7,7 @@ edition = "2024"
 arboard = { version = "3.6.1", optional = true, features = [
   "wayland-data-control",
 ] }
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", optional = true, features = ["derive"] }
 color-eyre = "0.6.5"
 colorgrad = { version = "0.8.0", features = ["preset"] }
 crossbeam-channel = "0.5.15"
@@ -48,5 +48,6 @@ debug = true         # Full debug info for symbols
 strip = false        # Don't strip symbols
 
 [features]
-default = ["clipboard"]
+default = ["clipboard", "full-cli"]
 clipboard = ["dep:arboard"]
+full-cli = ["dep:clap"]

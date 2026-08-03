@@ -26,7 +26,6 @@ fn main() -> Result<()> {
     init_logging()?;
     color_eyre::install()?;
 
-    use clap::Parser as _;
     let mut args = Args::parse();
 
     if args.include_all {
