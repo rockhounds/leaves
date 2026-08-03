@@ -560,3 +560,74 @@ pub fn par_forest(
         }
     })
 }
+
+/// Recursively recalculates cumulative size start offsets (`start`) for all entries in a `Forest`.
+///
+/// In `leaves`, a `Forest` is represented as `Vec<(usize, Entry)>`, where `usize` stores the
+/// cumulative size offset of all preceding siblings at that tree level (used for treemap layout partitioning).
+/// After pruning or removing an entry from a level, this function updates each entry's `start`
+/// offset to match the new running sum of preceding sibling sizes.
+pub fn recumsum_forest(forest: &mut Forest) {
+    let mut acc = 0;
+    for (start, entry) in forest.iter_mut() {
+        *start = acc;
+        recumsum_forest(&mut entry.subtree);
+        acc += entry.size;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_prune_and_recumsum() {
+        let entry1 = Entry {
+            path: PathBuf::from("/a"),
+            size: 100,
+            nfiles: 1,
+            leaves: 1,
+            ..Default::default()
+        };
+        let entry2 = Entry {
+            path: PathBuf::from("/b"),
+            size: 200,
+            nfiles: 1,
+            leaves: 1,
+            ..Default::default()
+        };
+        let entry3 = Entry {
+            path: PathBuf::from("/c"),
+            size: 300,
+            nfiles: 1,
+            leaves: 1,
+            ..Default::default()
+        };
+
+        // Forest entries are stored as (cumulative_start_offset, Entry).
+        // - entry1 (size 100) starts at cumulative offset 0
+        // - entry2 (size 200) starts at cumulative offset 100 (0 + 100)
+        // - entry3 (size 300) starts at cumulative offset 300 (100 + 200)
+        let mut forest: Forest = vec![(0, entry1), (100, entry2), (300, entry3)];
+
+        // Prune entry2 at offset 100
+        let pruned = prune_entry(&mut forest, &[100]);
+        assert!(pruned.is_left());
+        if let Either::Left(removed) = pruned {
+            assert_eq!(removed.path, PathBuf::from("/b"));
+        }
+
+        assert_eq!(forest.len(), 2);
+
+        // Recalculate cumulative start offsets after node removal:
+        // - entry1 (size 100) remains at cumulative offset 0
+        // - entry3 (size 300) should now start at cumulative offset 100 (0 + 100 instead of 300)
+        recumsum_forest(&mut forest);
+
+        assert_eq!(forest[0].0, 0);
+        assert_eq!(forest[0].1.path, PathBuf::from("/a"));
+        assert_eq!(forest[1].0, 100);
+        assert_eq!(forest[1].1.path, PathBuf::from("/c"));
+    }
+}
